@@ -101,6 +101,24 @@ CONTACT_CRITERIA = [
 ]
 CONTACT_KEYS = [k for k, _ in CONTACT_CRITERIA]
 
+# === Блок "СЛЕДУЮЩИЙ ШАГ / ЗАВЕРШЕНИЕ" (закрытие звонка) ===
+NEXTSTEP_CRITERIA = [
+    ("next_fixed_agreement", "Зафиксировал договорённость / промежуточный результат"),
+    ("next_time_set",        "Установил конкретные дату и время след. контакта"),
+    ("next_own_action",      "Чётко обозначил своё следующее действие"),
+    ("next_result_details",  "Обозначил характеристики результата (товары в счёте)"),
+    ("next_benefits",        "Обозначил преимущества следующего шага"),
+    ("next_polite_close",    "Вежливо завершил диалог"),
+]
+NEXTSTEP_KEYS = [k for k, _ in NEXTSTEP_CRITERIA]
+
+# === Блок "РЕЧЬ" (качество речи менеджера) ===
+SPEECH_CRITERIA = [
+    ("speech_literacy", "Грамотность: логичное, последовательное изложение"),
+    ("speech_empathy",  "Эмпатия: фразы активного слушания (понимаю/согласен/верно)"),
+]
+SPEECH_KEYS = [k for k, _ in SPEECH_CRITERIA]
+
 def block_score_1_5(analysis, keys):
     """Балл блока 1-5: 0 действий -> 1, далее = число выполненных действий, потолок 5."""
     count = sum(int(analysis.get(k, 0) or 0) for k in keys)
@@ -851,7 +869,6 @@ elif st.session_state.current_step == 2:
 13. "knowledge_quality": Компетентность. (1 = уверенные ответы, 0 = незнание/ошибки).
 14. "software_proficiency": Работа с ПО. (1 = быстрый поиск, 0 = долгие неловкие паузы).
 15. "politeness": Вежливость. (1 = тактично, 0 = грубо/сухо).
-16. "call_completion": Закрытие сделки / Следующий шаг. (1 = назначен твердый следующий шаг, 0 = звонок завершен 'в никуда').
 
 БЛОК "ПОТРЕБНОСТЬ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Насколько глубоко менеджер выявил ситуацию клиента. Ставь 1 ТОЛЬКО если в разговоре это реально прозвучало:
 18. "need_purpose": Узнал цель покупки клиента (например, стройка, ремонт, перепродажа, производство).
@@ -892,6 +909,18 @@ elif st.session_state.current_step == 2:
 45. "contact_convenient_time": Узнал удобное время для связи с учётом часового пояса.
 46. "contact_additional": Узнал дополнительные контактные данные (мессенджеры, доб. номер).
 
+БЛОК "СЛЕДУЮЩИЙ ШАГ / ЗАВЕРШЕНИЕ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Как менеджер закрыл звонок и зафиксировал следующий шаг:
+47. "next_fixed_agreement": Зафиксировал договорённость или промежуточный результат разговора.
+48. "next_time_set": Установил конкретные дату и время следующего контакта.
+49. "next_own_action": Чётко обозначил своё следующее действие ("я отправлю счёт", "перезвоню в среду").
+50. "next_result_details": Обозначил характеристики результата следующего шага (например, какие товары будут в счёте).
+51. "next_benefits": Обозначил преимущества следующего шага для клиента.
+52. "next_polite_close": Вежливо завершил диалог (попрощался, поблагодарил).
+
+БЛОК "РЕЧЬ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Качество речи менеджера:
+53. "speech_literacy": Грамотность — логичное и последовательное выражение мысли, без сумбура.
+54. "speech_empathy": Эмпатия — использовал фразы активного слушания ("понимаю вас", "согласен", "верно", "конечно" и подобные).
+
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
                 response = client.chat.completions.create(model=analysis_model, messages=[
@@ -927,16 +956,16 @@ elif st.session_state.current_step == 2:
                 
                 required_fields = ["topic", "call_type", "technical_issue", "client_request", "solution", "urgency", "client_mood", "manager_actions", "recommendations",
                                     "establishing_contact", "client_type", "clarifying_questions",
-                                    "knowledge_quality", "software_proficiency", "politeness", "call_completion"] + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS + CONTACT_KEYS
+                                    "knowledge_quality", "software_proficiency", "politeness"] + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS + CONTACT_KEYS + NEXTSTEP_KEYS + SPEECH_KEYS
 
                 for field in required_fields:
                     if field not in analysis_result:
                         analysis_result[field] = "Не определено" if field in ["topic", "call_type", "client_request", "solution", "urgency", "client_mood", "manager_actions"] else 0
                 
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
-                                "knowledge_quality", "software_proficiency", "call_completion", "politeness"]
+                                "knowledge_quality", "software_proficiency", "politeness"]
 
-                for field in binary_fields + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS + CONTACT_KEYS:
+                for field in binary_fields + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS + CONTACT_KEYS + NEXTSTEP_KEYS + SPEECH_KEYS:
                     if field in analysis_result:
                         try:
                             val = analysis_result[field]
@@ -1043,20 +1072,24 @@ elif st.session_state.current_step == 3:
             for result in successful:
                 analysis = result['analysis']
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
-                                "knowledge_quality", "software_proficiency", "politeness", "call_completion"]
+                                "knowledge_quality", "software_proficiency", "politeness"]
                 
                 total_score = sum(safe_int(analysis.get(k, 0)) for k in binary_fields)
                 need_score = block_score_1_5(analysis, NEED_KEYS)
                 obj_score = block_score_1_5(analysis, OBJ_KEYS)
                 dozhim_score = block_score_1_5(analysis, DOZHIM_KEYS)
                 contact_score = block_score_1_5(analysis, CONTACT_KEYS)
+                nextstep_score = block_score_1_5(analysis, NEXTSTEP_KEYS)
+                speech_score = block_score_1_5(analysis, SPEECH_KEYS)
                 had_obj = safe_int(analysis.get("had_objections", 1)) == 1
                 is_tech_issue = safe_int(analysis.get("technical_issue", 0)) == 1
-                score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/7"
+                score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/6"
                 need_display = "Н/О" if is_tech_issue else f"{need_score}/5"
                 obj_display = "Н/О" if is_tech_issue else ("Н/У" if not had_obj else f"{obj_score}/5")
                 dozhim_display = "Н/О" if is_tech_issue else f"{dozhim_score}/5"
                 contact_display = "Н/О" if is_tech_issue else f"{contact_score}/5"
+                nextstep_display = "Н/О" if is_tech_issue else f"{nextstep_score}/5"
+                speech_display = "Н/О" if is_tech_issue else f"{speech_score}/5"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -1071,6 +1104,8 @@ elif st.session_state.current_step == 3:
                 st.write(f"  🛡️ Возражения: {obj_display}")
                 st.write(f"  🎯 Дожим: {dozhim_display}")
                 st.write(f"  📇 Кл/счёт (контакты): {contact_display}")
+                st.write(f"  ➡️ Следующий шаг: {nextstep_display}")
+                st.write(f"  🗣️ Речь: {speech_display}")
                 st.write("---")
     
     if failed:
@@ -1126,10 +1161,9 @@ elif st.session_state.current_step == 3:
                         clarifying_questions = analysis.get("clarifying_questions", 0)
                         knowledge_quality = analysis.get("knowledge_quality", 0)
                         software_proficiency = analysis.get("software_proficiency", 0)
-                        call_completion = analysis.get("call_completion", 0)
                         politeness = analysis.get("politeness", 0)
 
-                        total_score = int(establishing_contact) + int(client_type) + int(clarifying_questions) + int(knowledge_quality) + int(software_proficiency) + int(politeness) + int(call_completion)
+                        total_score = int(establishing_contact) + int(client_type) + int(clarifying_questions) + int(knowledge_quality) + int(software_proficiency) + int(politeness)
                         
                         is_tech_issue = str(analysis.get("technical_issue", "0")).strip() == "1"
                         sheet_score = "Брак связи" if is_tech_issue else total_score
@@ -1145,6 +1179,8 @@ elif st.session_state.current_step == 3:
                             obj_block = block_score_1_5(analysis, OBJ_KEYS)
                         dozhim_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, DOZHIM_KEYS)
                         contact_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, CONTACT_KEYS)
+                        nextstep_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, NEXTSTEP_KEYS)
+                        speech_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, SPEECH_KEYS)
 
                         row_data = [
                             result['call_date'],
@@ -1164,11 +1200,12 @@ elif st.session_state.current_step == 3:
                             knowledge_quality,
                             software_proficiency,
                             politeness,
-                            call_completion,
                             need_block,
                             obj_block,
                             dozhim_block,
                             contact_block,
+                            nextstep_block,
+                            speech_block,
                             sheet_score,
                             analysis.get("recommendations", "")
                         ]
@@ -1176,7 +1213,7 @@ elif st.session_state.current_step == 3:
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:X{end_row}"
+                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:Y{end_row}"
                     
                     body = {'values': all_rows_data}
                     
@@ -1240,7 +1277,6 @@ elif st.session_state.current_step == 4:
                 ("Качество консультации", "knowledge_quality"),
                 ("Работа в программах", "software_proficiency"),
                 ("Вежливость общения", "politeness"),
-                ("Завершение звонка", "call_completion")
             ]
             total_score = 0
             for label, key in binary_criteria:
@@ -1256,12 +1292,12 @@ elif st.session_state.current_step == 4:
                 st.markdown("### 🏆 Итоговая оценка: **Н/О (Брак связи)**")
                 st.warning("⚠️ Оценка не учитывается в статистике менеджера из-за технических проблем со связью.")
             else:
-                st.markdown(f"### 🏆 Итоговая оценка: **{total_score}/7**")
-                st.progress(total_score / 7)
+                st.markdown(f"### 🏆 Итоговая оценка: **{total_score}/6**")
+                st.progress(total_score / 6)
 
-                if total_score >= 5:
+                if total_score >= 4:
                     st.success("Отличное качество! 🎉")
-                elif total_score >= 3:
+                elif total_score >= 2:
                     st.warning("Средний результат.")
                 else:
                     st.error("Требуется обучение.")
@@ -1332,5 +1368,37 @@ elif st.session_state.current_step == 4:
             else:
                 st.markdown(f"### 📊 Кл/счёт: **{contact_score}/5**  _(действий: {contact_count})_")
                 st.progress(contact_score / 5)
+
+            st.markdown("---")
+            st.markdown("#### ➡️ Блок «Следующий шаг / завершение»")
+            nextstep_count = 0
+            for label, key in NEXTSTEP_CRITERIA:
+                value = result['analysis'].get(key, 0)
+                score = 1 if value == 1 else 0
+                nextstep_count += score
+                icon = "✅" if score == 1 else "❌"
+                st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
+            nextstep_score = max(1, min(nextstep_count, 5))
+            if is_tech_issue:
+                st.markdown("### 📊 Следующий шаг: **Н/О (Брак связи)**")
+            else:
+                st.markdown(f"### 📊 Следующий шаг: **{nextstep_score}/5**  _(действий: {nextstep_count})_")
+                st.progress(nextstep_score / 5)
+
+            st.markdown("---")
+            st.markdown("#### 🗣️ Блок «Речь»")
+            speech_count = 0
+            for label, key in SPEECH_CRITERIA:
+                value = result['analysis'].get(key, 0)
+                score = 1 if value == 1 else 0
+                speech_count += score
+                icon = "✅" if score == 1 else "❌"
+                st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
+            speech_score = max(1, min(speech_count, 5))
+            if is_tech_issue:
+                st.markdown("### 📊 Речь: **Н/О (Брак связи)**")
+            else:
+                st.markdown(f"### 📊 Речь: **{speech_score}/5**  _(действий: {speech_count})_")
+                st.progress(speech_score / 5)
 
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()
