@@ -77,6 +77,19 @@ OBJECTION_CRITERIA = [
 ]
 OBJ_KEYS = [k for k, _ in OBJECTION_CRITERIA]
 
+# === Критерии блока "ДОЖИМ" (закрытие сделки / дожатие клиента) ===
+DOZHIM_CRITERIA = [
+    ("dozhim_concrete_solution", "Предложил конкретное решение после закрытия возражений"),
+    ("dozhim_action_plan",       "Предложил план действий и вовлёк клиента"),
+    ("dozhim_detailed_offer",    "Детализировал предложение под потребности клиента"),
+    ("dozhim_no_pressure",       "Не давил, не создавал стресс"),
+    ("dozhim_alternative",       "Предложил альтернативное решение"),
+    ("dozhim_better_terms",      "Предложил условия лучше озвученных ранее"),
+    ("dozhim_scarcity",          "Создал ограничение по времени/составу (дефицит)"),
+    ("dozhim_upsell",            "Предложил дополнительные услуги"),
+]
+DOZHIM_KEYS = [k for k, _ in DOZHIM_CRITERIA]
+
 def block_score_1_5(analysis, keys):
     """Балл блока 1-5: 0 действий -> 1, далее = число выполненных действий, потолок 5."""
     count = sum(int(analysis.get(k, 0) or 0) for k in keys)
@@ -841,7 +854,8 @@ elif st.session_state.current_step == 2:
 25. "need_other_projects": Узнал о других проектах клиента (иные объекты, будущие потребности).
 
 БЛОК "ВОЗРАЖЕНИЯ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Как менеджер (МОП) отработал возражения и сомнения клиента.
-⚠️ Отмечай 1 ТОЛЬКО за реально выполненные действия. Если возражений у клиента не было, большинство пунктов будут 0 — это нормально.
+"had_objections": Были ли у клиента возражения или сомнения в звонке? (1 = да, были; 0 = нет, клиент не возражал). Если 0 — блок не учитывается (Н/У).
+⚠️ Отмечай 1 ТОЛЬКО за реально выполненные действия. Если возражений не было, пункты 26-32 будут 0 — это нормально, блок просто не зачтётся.
 26. "obj_active_listening": Использовал активное слушание — принял сторону клиента, показал понимание ("понимаю вас", "согласен, это важно").
 27. "obj_no_interrupt": Не перебивал клиента, дал полностью выразить мысль/возражение.
 28. "obj_no_argue": Не спорил с клиентом, не шёл в конфликт (фразы "вы не правы", "это не так" = 0).
@@ -849,6 +863,16 @@ elif st.session_state.current_step == 2:
 30. "obj_direct_answer": Прямо ответил на сомнения клиента, не ушёл от ответа.
 31. "obj_arguments": Привёл аргументы и контраргументы в пользу предложения.
 32. "obj_leading_questions": Задавал наводящие вопросы так, что клиент сам пришёл к закрытию своих сомнений.
+
+БЛОК "ДОЖИМ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Как менеджер дожимал клиента к сделке / следующему шагу:
+33. "dozhim_concrete_solution": Предложил конкретное решение после закрытия возражений.
+34. "dozhim_action_plan": Предложил план действий и вовлёк клиента (что и когда делаем дальше).
+35. "dozhim_detailed_offer": Детализировал предложение исходя из потребностей клиента.
+36. "dozhim_no_pressure": Не давил на клиента и не создавал стресс/негатив.
+37. "dozhim_alternative": Предложил альтернативное решение (если основное не подошло).
+38. "dozhim_better_terms": Предложил условия лучше озвученных ранее (скидка, бонус, доставка).
+39. "dozhim_scarcity": Создал ограничение по времени или составу предложения (дефицит, "только сегодня").
+40. "dozhim_upsell": Предложил дополнительные услуги или товары (допродажа).
 
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
@@ -885,7 +909,7 @@ elif st.session_state.current_step == 2:
                 
                 required_fields = ["topic", "call_type", "technical_issue", "client_request", "solution", "urgency", "client_mood", "manager_actions", "recommendations",
                                     "establishing_contact", "client_type", "clarifying_questions",
-                                    "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"] + NEED_KEYS + OBJ_KEYS
+                                    "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"] + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS
 
                 for field in required_fields:
                     if field not in analysis_result:
@@ -894,7 +918,7 @@ elif st.session_state.current_step == 2:
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
                                 "knowledge_quality", "contact_exchange", "software_proficiency", "call_completion", "politeness"]
 
-                for field in binary_fields + NEED_KEYS + OBJ_KEYS:
+                for field in binary_fields + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS:
                     if field in analysis_result:
                         try:
                             val = analysis_result[field]
@@ -908,7 +932,17 @@ elif st.session_state.current_step == 2:
                             analysis_result[field] = 0
                     else:
                         analysis_result[field] = 0
-                
+
+                # Флаг наличия возражений (по умолчанию считаем, что были — честный подсчёт)
+                _hv = analysis_result.get("had_objections", 1)
+                if isinstance(_hv, str):
+                    analysis_result["had_objections"] = 1 if _hv.lower().strip() in ["1", "да", "yes", "true"] else 0
+                else:
+                    try:
+                        analysis_result["had_objections"] = 1 if int(_hv) > 0 else 0
+                    except Exception:
+                        analysis_result["had_objections"] = 1
+
                 filename = uploaded_file.name
                 base_name = filename[:-4] if filename.lower().endswith(('.mp3', '.wav', '.m4a')) else filename
                 parts = base_name.split('-')
@@ -996,10 +1030,13 @@ elif st.session_state.current_step == 3:
                 total_score = sum(safe_int(analysis.get(k, 0)) for k in binary_fields)
                 need_score = block_score_1_5(analysis, NEED_KEYS)
                 obj_score = block_score_1_5(analysis, OBJ_KEYS)
+                dozhim_score = block_score_1_5(analysis, DOZHIM_KEYS)
+                had_obj = safe_int(analysis.get("had_objections", 1)) == 1
                 is_tech_issue = safe_int(analysis.get("technical_issue", 0)) == 1
                 score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/8"
                 need_display = "Н/О" if is_tech_issue else f"{need_score}/5"
-                obj_display = "Н/О" if is_tech_issue else f"{obj_score}/5"
+                obj_display = "Н/О" if is_tech_issue else ("Н/У" if not had_obj else f"{obj_score}/5")
+                dozhim_display = "Н/О" if is_tech_issue else f"{dozhim_score}/5"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -1012,6 +1049,7 @@ elif st.session_state.current_step == 3:
                 st.write(f"  ⭐ Оценка: {score_display}")
                 st.write(f"  🔎 Потребность: {need_display}")
                 st.write(f"  🛡️ Возражения: {obj_display}")
+                st.write(f"  🎯 Дожим: {dozhim_display}")
                 st.write("---")
     
     if failed:
@@ -1076,9 +1114,16 @@ elif st.session_state.current_step == 3:
                         is_tech_issue = str(analysis.get("technical_issue", "0")).strip() == "1"
                         sheet_score = "Брак связи" if is_tech_issue else total_score
 
-                        # Блоки "ПОТРЕБНОСТЬ" и "ВОЗРАЖЕНИЯ" — единый балл 1-5 по числу действий
+                        # Блоки 1-5 по числу действий; Возражения = Н/У, если возражений не было
+                        had_obj = int(analysis.get("had_objections", 1) or 0) == 1
                         need_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, NEED_KEYS)
-                        obj_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, OBJ_KEYS)
+                        if is_tech_issue:
+                            obj_block = "Брак связи"
+                        elif not had_obj:
+                            obj_block = "Н/У"
+                        else:
+                            obj_block = block_score_1_5(analysis, OBJ_KEYS)
+                        dozhim_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, DOZHIM_KEYS)
 
                         row_data = [
                             result['call_date'],
@@ -1102,6 +1147,7 @@ elif st.session_state.current_step == 3:
                             call_completion,
                             need_block,
                             obj_block,
+                            dozhim_block,
                             sheet_score,
                             analysis.get("recommendations", "")
                         ]
@@ -1109,7 +1155,7 @@ elif st.session_state.current_step == 3:
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:W{end_row}"
+                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:X{end_row}"
                     
                     body = {'values': all_rows_data}
                     
@@ -1226,10 +1272,29 @@ elif st.session_state.current_step == 4:
                 icon = "✅" if score == 1 else "❌"
                 st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
             obj_score = max(1, min(obj_count, 5))
+            had_obj = int(result['analysis'].get("had_objections", 1) or 0) == 1
             if is_tech_issue:
                 st.markdown("### 📊 Возражения: **Н/О (Брак связи)**")
+            elif not had_obj:
+                st.markdown("### 📊 Возражения: **Н/У** _(возражений не было)_")
             else:
                 st.markdown(f"### 📊 Возражения: **{obj_score}/5**  _(действий: {obj_count})_")
                 st.progress(obj_score / 5)
+
+            st.markdown("---")
+            st.markdown("#### 🎯 Блок «Дожим» (закрытие сделки)")
+            dozhim_count = 0
+            for label, key in DOZHIM_CRITERIA:
+                value = result['analysis'].get(key, 0)
+                score = 1 if value == 1 else 0
+                dozhim_count += score
+                icon = "✅" if score == 1 else "❌"
+                st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
+            dozhim_score = max(1, min(dozhim_count, 5))
+            if is_tech_issue:
+                st.markdown("### 📊 Дожим: **Н/О (Брак связи)**")
+            else:
+                st.markdown(f"### 📊 Дожим: **{dozhim_score}/5**  _(действий: {dozhim_count})_")
+                st.progress(dozhim_score / 5)
 
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()
