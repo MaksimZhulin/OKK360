@@ -90,6 +90,17 @@ DOZHIM_CRITERIA = [
 ]
 DOZHIM_KEYS = [k for k, _ in DOZHIM_CRITERIA]
 
+# === Блок "КОНТАКТНЫЕ ДАННЫЕ / Кл-счёт" (обмен контактами с клиентом) ===
+CONTACT_CRITERIA = [
+    ("contact_preferred_channel", "Узнал предпочитаемый способ связи"),
+    ("contact_email",             "Узнал/уточнил контактную почту"),
+    ("contact_phone",             "Узнал/уточнил контактный телефон"),
+    ("contact_other_person",      "Узнал иное контактное лицо для связи"),
+    ("contact_convenient_time",   "Узнал удобное время связи (часовой пояс)"),
+    ("contact_additional",        "Узнал дополнительные контактные данные"),
+]
+CONTACT_KEYS = [k for k, _ in CONTACT_CRITERIA]
+
 def block_score_1_5(analysis, keys):
     """Балл блока 1-5: 0 действий -> 1, далее = число выполненных действий, потолок 5."""
     count = sum(int(analysis.get(k, 0) or 0) for k in keys)
@@ -831,17 +842,16 @@ elif st.session_state.current_step == 2:
      ШАГ Б: Если "call_type" == "Повторный", ОБЯЗАТЕЛЬНО добавь в конец текста фразу: "(Звонок является продолжением диалога, поэтому часть базовых критериев засчитана автоматически)".
 
 БИНАРНЫЕ КРИТЕРИИ (Оценивай строго: 1 = ДА, 0 = НЕТ):
-⚠️ ПРАВИЛО ДЛЯ ПОВТОРНЫХ ЗВОНКОВ: Если "call_type" == "Повторный", ты ОБЯЗАН ставить 1 (оправдано) в критериях "establishing_contact", "client_type", "clarifying_questions" и "contact_exchange", так как этот этап уже пройден ранее.
+⚠️ ПРАВИЛО ДЛЯ ПОВТОРНЫХ ЗВОНКОВ: Если "call_type" == "Повторный", ты ОБЯЗАН ставить 1 (оправдано) в критериях "establishing_contact", "client_type" и "clarifying_questions", так как этот этап уже пройден ранее.
 ⚠️ ПРАВИЛО ДЛЯ БРАКА СВЯЗИ: Если "technical_issue" == 1, оценивай всё ОБЪЕКТИВНО по тому, что слышишь (ставь 0, если чего-то нет). Система сама исключит этот звонок из KPI, не завышай оценки искусственно!
 
 10. "establishing_contact": Установление контакта. (Приветствие + Название компании + Имя). 
 11. "client_type": Тип клиента (физ/юр лицо). 
 12. "clarifying_questions": Выявление потребностей. (Минимум 2 вопроса о товаре).
 13. "knowledge_quality": Компетентность. (1 = уверенные ответы, 0 = незнание/ошибки).
-14. "contact_exchange": Обмен контактами. (1 = получен телефон/почта, 0 = не получено). 
-15. "software_proficiency": Работа с ПО. (1 = быстрый поиск, 0 = долгие неловкие паузы).
-16. "politeness": Вежливость. (1 = тактично, 0 = грубо/сухо).
-17. "call_completion": Закрытие сделки / Следующий шаг. (1 = назначен твердый следующий шаг, 0 = звонок завершен 'в никуда').
+14. "software_proficiency": Работа с ПО. (1 = быстрый поиск, 0 = долгие неловкие паузы).
+15. "politeness": Вежливость. (1 = тактично, 0 = грубо/сухо).
+16. "call_completion": Закрытие сделки / Следующий шаг. (1 = назначен твердый следующий шаг, 0 = звонок завершен 'в никуда').
 
 БЛОК "ПОТРЕБНОСТЬ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Насколько глубоко менеджер выявил ситуацию клиента. Ставь 1 ТОЛЬКО если в разговоре это реально прозвучало:
 18. "need_purpose": Узнал цель покупки клиента (например, стройка, ремонт, перепродажа, производство).
@@ -873,6 +883,14 @@ elif st.session_state.current_step == 2:
 38. "dozhim_better_terms": Предложил условия лучше озвученных ранее (скидка, бонус, доставка).
 39. "dozhim_scarcity": Создал ограничение по времени или составу предложения (дефицит, "только сегодня").
 40. "dozhim_upsell": Предложил дополнительные услуги или товары (допродажа).
+
+БЛОК "КОНТАКТНЫЕ ДАННЫЕ / Кл-счёт" (Оценивай строго: 1 = ДА, 0 = НЕТ). Насколько полно менеджер собрал контактные данные клиента:
+41. "contact_preferred_channel": Узнал предпочитаемый способ связи (звонок, WhatsApp, почта).
+42. "contact_email": Узнал или уточнил контактную электронную почту.
+43. "contact_phone": Узнал или уточнил контактный номер телефона.
+44. "contact_other_person": Узнал иное контактное лицо для связи (ЛПР, снабженец, бухгалтер).
+45. "contact_convenient_time": Узнал удобное время для связи с учётом часового пояса.
+46. "contact_additional": Узнал дополнительные контактные данные (мессенджеры, доб. номер).
 
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
@@ -909,16 +927,16 @@ elif st.session_state.current_step == 2:
                 
                 required_fields = ["topic", "call_type", "technical_issue", "client_request", "solution", "urgency", "client_mood", "manager_actions", "recommendations",
                                     "establishing_contact", "client_type", "clarifying_questions",
-                                    "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"] + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS
+                                    "knowledge_quality", "software_proficiency", "politeness", "call_completion"] + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS + CONTACT_KEYS
 
                 for field in required_fields:
                     if field not in analysis_result:
                         analysis_result[field] = "Не определено" if field in ["topic", "call_type", "client_request", "solution", "urgency", "client_mood", "manager_actions"] else 0
                 
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
-                                "knowledge_quality", "contact_exchange", "software_proficiency", "call_completion", "politeness"]
+                                "knowledge_quality", "software_proficiency", "call_completion", "politeness"]
 
-                for field in binary_fields + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS:
+                for field in binary_fields + NEED_KEYS + OBJ_KEYS + DOZHIM_KEYS + CONTACT_KEYS:
                     if field in analysis_result:
                         try:
                             val = analysis_result[field]
@@ -1025,18 +1043,20 @@ elif st.session_state.current_step == 3:
             for result in successful:
                 analysis = result['analysis']
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
-                                "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"]
+                                "knowledge_quality", "software_proficiency", "politeness", "call_completion"]
                 
                 total_score = sum(safe_int(analysis.get(k, 0)) for k in binary_fields)
                 need_score = block_score_1_5(analysis, NEED_KEYS)
                 obj_score = block_score_1_5(analysis, OBJ_KEYS)
                 dozhim_score = block_score_1_5(analysis, DOZHIM_KEYS)
+                contact_score = block_score_1_5(analysis, CONTACT_KEYS)
                 had_obj = safe_int(analysis.get("had_objections", 1)) == 1
                 is_tech_issue = safe_int(analysis.get("technical_issue", 0)) == 1
-                score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/8"
+                score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/7"
                 need_display = "Н/О" if is_tech_issue else f"{need_score}/5"
                 obj_display = "Н/О" if is_tech_issue else ("Н/У" if not had_obj else f"{obj_score}/5")
                 dozhim_display = "Н/О" if is_tech_issue else f"{dozhim_score}/5"
+                contact_display = "Н/О" if is_tech_issue else f"{contact_score}/5"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -1050,6 +1070,7 @@ elif st.session_state.current_step == 3:
                 st.write(f"  🔎 Потребность: {need_display}")
                 st.write(f"  🛡️ Возражения: {obj_display}")
                 st.write(f"  🎯 Дожим: {dozhim_display}")
+                st.write(f"  📇 Кл/счёт (контакты): {contact_display}")
                 st.write("---")
     
     if failed:
@@ -1104,12 +1125,11 @@ elif st.session_state.current_step == 3:
                         client_type = analysis.get("client_type", 0)
                         clarifying_questions = analysis.get("clarifying_questions", 0)
                         knowledge_quality = analysis.get("knowledge_quality", 0)
-                        contact_exchange = analysis.get("contact_exchange", 0)
                         software_proficiency = analysis.get("software_proficiency", 0)
                         call_completion = analysis.get("call_completion", 0)
                         politeness = analysis.get("politeness", 0)
 
-                        total_score = int(establishing_contact) + int(client_type) + int(clarifying_questions) + int(knowledge_quality) + int(contact_exchange) + int(software_proficiency) + int(politeness) + int(call_completion)
+                        total_score = int(establishing_contact) + int(client_type) + int(clarifying_questions) + int(knowledge_quality) + int(software_proficiency) + int(politeness) + int(call_completion)
                         
                         is_tech_issue = str(analysis.get("technical_issue", "0")).strip() == "1"
                         sheet_score = "Брак связи" if is_tech_issue else total_score
@@ -1124,6 +1144,7 @@ elif st.session_state.current_step == 3:
                         else:
                             obj_block = block_score_1_5(analysis, OBJ_KEYS)
                         dozhim_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, DOZHIM_KEYS)
+                        contact_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, CONTACT_KEYS)
 
                         row_data = [
                             result['call_date'],
@@ -1141,13 +1162,13 @@ elif st.session_state.current_step == 3:
                             client_type,
                             clarifying_questions,
                             knowledge_quality,
-                            contact_exchange,
                             software_proficiency,
                             politeness,
                             call_completion,
                             need_block,
                             obj_block,
                             dozhim_block,
+                            contact_block,
                             sheet_score,
                             analysis.get("recommendations", "")
                         ]
@@ -1217,7 +1238,6 @@ elif st.session_state.current_step == 4:
                 ("Определение физ/юр лица", "client_type"),
                 ("Уточняющие вопросы", "clarifying_questions"),
                 ("Качество консультации", "knowledge_quality"),
-                ("Обмен контактами", "contact_exchange"),
                 ("Работа в программах", "software_proficiency"),
                 ("Вежливость общения", "politeness"),
                 ("Завершение звонка", "call_completion")
@@ -1236,12 +1256,12 @@ elif st.session_state.current_step == 4:
                 st.markdown("### 🏆 Итоговая оценка: **Н/О (Брак связи)**")
                 st.warning("⚠️ Оценка не учитывается в статистике менеджера из-за технических проблем со связью.")
             else:
-                st.markdown(f"### 🏆 Итоговая оценка: **{total_score}/8**")
-                st.progress(total_score / 8)
+                st.markdown(f"### 🏆 Итоговая оценка: **{total_score}/7**")
+                st.progress(total_score / 7)
 
-                if total_score >= 6:
+                if total_score >= 5:
                     st.success("Отличное качество! 🎉")
-                elif total_score >= 4:
+                elif total_score >= 3:
                     st.warning("Средний результат.")
                 else:
                     st.error("Требуется обучение.")
@@ -1296,5 +1316,21 @@ elif st.session_state.current_step == 4:
             else:
                 st.markdown(f"### 📊 Дожим: **{dozhim_score}/5**  _(действий: {dozhim_count})_")
                 st.progress(dozhim_score / 5)
+
+            st.markdown("---")
+            st.markdown("#### 📇 Блок «Кл/счёт, контактные данные»")
+            contact_count = 0
+            for label, key in CONTACT_CRITERIA:
+                value = result['analysis'].get(key, 0)
+                score = 1 if value == 1 else 0
+                contact_count += score
+                icon = "✅" if score == 1 else "❌"
+                st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
+            contact_score = max(1, min(contact_count, 5))
+            if is_tech_issue:
+                st.markdown("### 📊 Кл/счёт: **Н/О (Брак связи)**")
+            else:
+                st.markdown(f"### 📊 Кл/счёт: **{contact_score}/5**  _(действий: {contact_count})_")
+                st.progress(contact_score / 5)
 
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()
