@@ -14,7 +14,7 @@ DEEPSEEK_MODEL = "google/gemini-2.5-flash"
 # 2. Google Таблица
 CREDENTIALS_FILE = 'credentials.json'
 SPREADSHEET_ID = "1Oe-dKF_0oPhCdlwcj6jeco7BSIBi37jPuO3rSG4C930"
-SHEET_NAME = 'Лист1'
+SHEET_NAME = "'Выгрузка из проекта'"
 
 # 3. Настройки анализа
 MAX_TOKENS = 4000

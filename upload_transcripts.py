@@ -16,7 +16,7 @@ LOG_FILE = 'upload_log.txt'
 SPREADSHEET_ID = "1Oe-dKF_0oPhCdlwcj6jeco7BSIBi37jPuO3rSG4C930"
 
 # 3. Настройки таблицы
-SHEET_NAME = 'Лист1'  # Название листа в таблице
+SHEET_NAME = "'Выгрузка из проекта'"  # Название листа в таблице (в кавычках — есть пробелы)
 # =======================================
 
 def setup_folders():

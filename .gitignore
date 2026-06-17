@@ -300,6 +300,7 @@ celerybeat.pid
 .venv
 env/
 venv/
+venv_py314_old/
 ENV/
 env.bak/
 venv.bak/

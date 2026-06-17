@@ -7,7 +7,14 @@ import re
 import subprocess
 from datetime import datetime
 
-print("⚠️ ВНИМАНИЕ: SSL проверки включены (безопасный режим)")
+# Windows: консоль по умолчанию cp1251 и падает на эмодзи в print() — принудительно UTF-8
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+print("ВНИМАНИЕ: SSL проверки включены (безопасный режим)")
 import streamlit as st
 import torch
 import requests
@@ -23,7 +30,6 @@ except ImportError as e:
 import tempfile
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from google.cloud import speech
 from auto_learning import save_to_knowledge_base, calculate_confidence, find_similar_calls, get_database_stats
 
 def pad_audio_simple_silence(audio_path):
@@ -962,7 +968,7 @@ elif st.session_state.current_step == 3:
                     
                     SPREADSHEET_ID = "1Oe-dKF_0oPhCdlwcj6jeco7BSIBi37jPuO3rSG4C930"
                     
-                    range_to_check = 'Лист1!A:A'
+                    range_to_check = "'Выгрузка из проекта'!A:A"
                     result_sheets = service.spreadsheets().values().get(
                         spreadsheetId=SPREADSHEET_ID,
                         range=range_to_check
@@ -1021,7 +1027,7 @@ elif st.session_state.current_step == 3:
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f'Лист1!A{start_row}:U{end_row}'
+                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:U{end_row}"
                     
                     body = {'values': all_rows_data}
                     
