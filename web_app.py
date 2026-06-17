@@ -926,7 +926,7 @@ elif st.session_state.current_step == 2:
                 response = client.chat.completions.create(model=analysis_model, messages=[
                     {"role": "system", "content": "Ты — опытный аналитик колл-центра, специализирующийся на глубоком анализе транскрипций звонков. Твоя цель — предоставить всестороннюю, объективную и профессиональную оценку взаимодействия между клиентом и агентом, выявить ключевые паттерны, проблемы и предложить конкретные, действенные рекомендации. Отвечай строго в формате JSON."},
                     {"role": "user", "content": prompt}
-                ], temperature=0.3, max_tokens=1000)
+                ], temperature=0.3, max_tokens=2500)
 
                 result_text = response.choices[0].message.content.strip()
                 json_start = result_text.find('{')
@@ -960,7 +960,7 @@ elif st.session_state.current_step == 2:
 
                 for field in required_fields:
                     if field not in analysis_result:
-                        analysis_result[field] = "Не определено" if field in ["topic", "call_type", "client_request", "solution", "urgency", "client_mood", "manager_actions"] else 0
+                        analysis_result[field] = "Не определено" if field in ["topic", "call_type", "client_request", "solution", "urgency", "client_mood", "manager_actions", "recommendations"] else 0
                 
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
                                 "knowledge_quality", "software_proficiency", "politeness"]
@@ -1090,6 +1090,8 @@ elif st.session_state.current_step == 3:
                 contact_display = "Н/О" if is_tech_issue else f"{contact_score}/5"
                 nextstep_display = "Н/О" if is_tech_issue else f"{nextstep_score}/5"
                 speech_display = "Н/О" if is_tech_issue else f"{speech_score}/5"
+                grand = total_score + need_score + dozhim_score + contact_score + nextstep_score + speech_score + (obj_score if had_obj else 0)
+                grand_display = "Н/О (Брак связи)" if is_tech_issue else f"{grand}/33"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -1099,7 +1101,8 @@ elif st.session_state.current_step == 3:
                 st.write(f"  👤 Оператор: {result['operator_name']}")
                 st.write(f"  📞 Тип звонка: {type_badge}")
                 st.write(f"  🎯 Тема: {result['analysis'].get('topic', '—')}")
-                st.write(f"  ⭐ Оценка: {score_display}")
+                st.write(f"  🏆 Общий балл: {grand_display}")
+                st.write(f"  ⭐ Базовый: {score_display}")
                 st.write(f"  🔎 Потребность: {need_display}")
                 st.write(f"  🛡️ Возражения: {obj_display}")
                 st.write(f"  🎯 Дожим: {dozhim_display}")
@@ -1166,7 +1169,6 @@ elif st.session_state.current_step == 3:
                         total_score = int(establishing_contact) + int(client_type) + int(clarifying_questions) + int(knowledge_quality) + int(software_proficiency) + int(politeness)
                         
                         is_tech_issue = str(analysis.get("technical_issue", "0")).strip() == "1"
-                        sheet_score = "Брак связи" if is_tech_issue else total_score
 
                         # Блоки 1-5 по числу действий; Возражения = Н/У, если возражений не было
                         had_obj = int(analysis.get("had_objections", 1) or 0) == 1
@@ -1181,6 +1183,14 @@ elif st.session_state.current_step == 3:
                         contact_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, CONTACT_KEYS)
                         nextstep_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, NEXTSTEP_KEYS)
                         speech_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, SPEECH_KEYS)
+
+                        # Итоговый балл = базовые (0-6) + все блоки. Максимум 6+5+5+5+5+5+2 = 33
+                        if is_tech_issue:
+                            grand_total = "Брак связи"
+                        else:
+                            grand_total = (total_score + need_block + dozhim_block + contact_block
+                                           + nextstep_block + speech_block
+                                           + (obj_block if isinstance(obj_block, int) else 0))
 
                         row_data = [
                             result['call_date'],
@@ -1206,7 +1216,7 @@ elif st.session_state.current_step == 3:
                             contact_block,
                             nextstep_block,
                             speech_block,
-                            sheet_score,
+                            grand_total,
                             analysis.get("recommendations", "")
                         ]
                         all_rows_data.append(row_data)
@@ -1400,5 +1410,12 @@ elif st.session_state.current_step == 4:
             else:
                 st.markdown(f"### 📊 Речь: **{speech_score}/5**  _(действий: {speech_count})_")
                 st.progress(speech_score / 5)
+
+            st.markdown("---")
+            if is_tech_issue:
+                st.markdown("## 🏆 Общий балл: **Н/О (Брак связи)**")
+            else:
+                grand = total_score + need_score + dozhim_score + contact_score + nextstep_score + speech_score + (obj_score if had_obj else 0)
+                st.markdown(f"## 🏆 Общий балл: **{grand} / 33**")
 
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()
