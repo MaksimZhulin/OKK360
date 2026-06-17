@@ -14,6 +14,25 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
+# WhisperX/Whisper вызывают ffmpeg как внешнюю программу. После установки ffmpeg
+# через winget он часто не виден в PATH уже запущенных процессов — находим его сами.
+import shutil
+import glob as _glob
+if shutil.which("ffmpeg") is None:
+    _ff_globs = []
+    _local = os.environ.get("LOCALAPPDATA", "")
+    if _local:
+        _ff_globs.append(os.path.join(_local, "Microsoft", "WinGet", "Packages",
+                                       "Gyan.FFmpeg*", "**", "bin", "ffmpeg.exe"))
+    for _pat in _ff_globs:
+        _hits = _glob.glob(_pat, recursive=True)
+        if _hits:
+            os.environ["PATH"] = os.path.dirname(_hits[0]) + os.pathsep + os.environ.get("PATH", "")
+            print(f"ffmpeg найден и добавлен в PATH: {_hits[0]}")
+            break
+    else:
+        print("⚠️ ffmpeg не найден — локальная транскрибация (WhisperX) работать не будет")
+
 print("ВНИМАНИЕ: SSL проверки включены (безопасный режим)")
 import streamlit as st
 import torch
