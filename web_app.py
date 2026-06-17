@@ -124,6 +124,65 @@ def block_score_1_5(analysis, keys):
     count = sum(int(analysis.get(k, 0) or 0) for k in keys)
     return max(1, min(count, 5))
 
+# Базовые критерии (ключ, подпись) — для рекомендаций
+BASE_CRITERIA_LABELS = [
+    ("establishing_contact", "Установление контакта"),
+    ("client_type", "Определение типа клиента (физ/юр)"),
+    ("clarifying_questions", "Уточняющие вопросы"),
+    ("knowledge_quality", "Качество консультации"),
+    ("software_proficiency", "Работа в программах"),
+    ("politeness", "Вежливость"),
+]
+# Блоки 1-5: (название, ключи, что улучшить при низком балле)
+REC_BLOCKS = [
+    ("Потребность", NEED_KEYS, "глубже выявлять ситуацию клиента — цель покупки, детали проекта, критерии выбора"),
+    ("Возражения", OBJ_KEYS, "отрабатывать возражения — уточнять причину, аргументировать, не спорить"),
+    ("Дожим", DOZHIM_KEYS, "активнее закрывать сделку — предлагать решение, план, выгоды"),
+    ("Кл/счёт, контакты", CONTACT_KEYS, "полнее собирать контакты — почта, телефон, удобное время, ЛПР"),
+    ("Следующий шаг", NEXTSTEP_KEYS, "фиксировать договорённость и назначать конкретный следующий шаг"),
+    ("Речь", SPEECH_KEYS, "следить за грамотностью и использовать фразы эмпатии"),
+]
+GRAND_MAX = 33  # 6 базовых + Потребность/Возражения/Дожим/Кл-счёт/Шаг по 5 + Речь 2
+
+def build_recommendation(analysis):
+    """Детерминированная рекомендация: вердикт по % от максимума + конкретные слабые зоны."""
+    if str(analysis.get("technical_issue", "0")).strip() == "1":
+        return "Оценка не объективна из-за брака связи / обрыва звонка — звонок исключён из статистики."
+
+    had_obj = int(analysis.get("had_objections", 1) or 0) == 1
+    grand = sum(int(analysis.get(k, 0) or 0) for k, _ in BASE_CRITERIA_LABELS)
+    weak = [label for k, label in BASE_CRITERIA_LABELS if int(analysis.get(k, 0) or 0) == 0]
+
+    max_total = GRAND_MAX
+    for name, keys, advice in REC_BLOCKS:
+        if name == "Возражения" and not had_obj:
+            max_total -= 5  # возражений не было — блок не применим
+            continue
+        sc = block_score_1_5(analysis, keys)
+        grand += sc
+        if sc <= 1:
+            weak.append(f"{name} ({advice})")
+
+    pct = round(grand / max_total * 100) if max_total else 0
+    if pct < 30:
+        verdict = "🔴 Критично"
+    elif pct < 50:
+        verdict = "🟠 Слабо"
+    elif pct < 70:
+        verdict = "🟡 Средне"
+    elif pct < 85:
+        verdict = "🟢 Хорошо"
+    else:
+        verdict = "🟢 Отлично"
+
+    rec = f"{verdict} — {grand}/{max_total} ({pct}%)."
+    rec += (" Зоны роста: " + "; ".join(weak) + ".") if weak else " Слабых зон не выявлено."
+
+    note = str(analysis.get("recommendations", "")).strip()
+    if note and note not in ("Не определено", "0") and len(note) > 5:
+        rec += f" Комментарий ИИ: {note}"
+    return rec
+
 def pad_audio_simple_silence(audio_path):
     """
     Самый безопасный хак: ровно 1.0 секунда тишины.
@@ -852,12 +911,7 @@ elif st.session_state.current_step == 2:
 6. "urgency": Срочность (выбери одно: Низкая / Средняя / Высокая).
 7. "client_mood": Настроение клиента (выбери одно: Нейтральное / Заинтересованное / Раздраженное / Довольное / Сомневающееся).
 8. "manager_actions": Ключевые действия менеджера (1-2 предложения).
-9. "recommendations": Ключевая зона роста для менеджера. 
-   Алгоритм:
-   - Если "technical_issue" == 1, напиши: "Оценка не объективна из-за брака связи/обрыва звонка".
-   - Иначе выполни два шага:
-     ШАГ А: Посмотри на бинарные критерии (пункты 10-17). Если есть "0", четко напиши, что упущено. Если везде "1", напиши "Отличная работа".
-     ШАГ Б: Если "call_type" == "Повторный", ОБЯЗАТЕЛЬНО добавь в конец текста фразу: "(Звонок является продолжением диалога, поэтому часть базовых критериев засчитана автоматически)".
+9. "recommendations": Краткое (1-2 предложения) ФАКТИЧЕСКОЕ наблюдение по сути разговора: что менеджер сделал хорошо и что конкретно упустил. БЕЗ слов "отлично/хорошо/плохо", без процентов и без общей оценки — только конкретика по содержанию. Итоговую оценку и зоны роста посчитает система отдельно.
 
 БИНАРНЫЕ КРИТЕРИИ (Оценивай строго: 1 = ДА, 0 = НЕТ):
 ⚠️ ПРАВИЛО ДЛЯ ПОВТОРНЫХ ЗВОНКОВ: Если "call_type" == "Повторный", ты ОБЯЗАН ставить 1 (оправдано) в критериях "establishing_contact", "client_type" и "clarifying_questions", так как этот этап уже пройден ранее.
@@ -989,6 +1043,9 @@ elif st.session_state.current_step == 2:
                         analysis_result["had_objections"] = 1 if int(_hv) > 0 else 0
                     except Exception:
                         analysis_result["had_objections"] = 1
+
+                # Рекомендация строится в коде (вердикт по % + слабые зоны), а не ИИ
+                analysis_result["recommendations"] = build_recommendation(analysis_result)
 
                 filename = uploaded_file.name
                 base_name = filename[:-4] if filename.lower().endswith(('.mp3', '.wav', '.m4a')) else filename
