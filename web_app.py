@@ -183,25 +183,25 @@ def build_recommendation(analysis):
         rec += f" Комментарий ИИ: {note}"
     return rec
 
-def pad_audio_simple_silence(audio_path):
+def pad_audio_simple_silence(audio_path, pad_seconds=2.0):
     """
-    Самый безопасный хак: ровно 1.0 секунда тишины.
-    Сдвигает первое слово из "мертвой зоны" начала файла, 
-    не ломая тайминги диаризации.
+    Добавляет тишину в начало файла, сдвигая первое слово из "мёртвой зоны"
+    начала записи (где VAD/Whisper часто срезает приветствие менеджера).
+    Не ломает тайминги диаризации. По умолчанию 2 секунды.
     """
     import soundfile as sf
     import numpy as np
-    
-    st.write("⏳ [Хак] Добавляем 1 сек тишины для защиты первого слова...")
-    
+
+    st.write(f"⏳ [Хак] Добавляем {pad_seconds:g} сек тишины для защиты первого слова...")
+
     try:
         data, samplerate = sf.read(audio_path)
-        
+
         if len(data.shape) > 1:
             channels = data.shape[1]
-            silence = np.zeros((int(samplerate * 1.0), channels), dtype=data.dtype)
+            silence = np.zeros((int(samplerate * pad_seconds), channels), dtype=data.dtype)
         else:
-            silence = np.zeros(int(samplerate * 1.0), dtype=data.dtype)
+            silence = np.zeros(int(samplerate * pad_seconds), dtype=data.dtype)
             
         padded_data = np.concatenate((silence, data))
         
@@ -507,6 +507,23 @@ def build_turns_from_words(result):
     if any(not w["speaker"] for w in words):
         return None  # разметки спикеров нет вовсе — откат
 
+    # Сглаживание дребезга: короткие "островки" (1-2 слова) чужого спикера,
+    # окружённые с ОБЕИХ сторон одним и тем же спикером, переносим к окружению.
+    runs = []
+    i = 0
+    while i < len(words):
+        j = i
+        while j < len(words) and words[j]["speaker"] == words[i]["speaker"]:
+            j += 1
+        runs.append([words[i]["speaker"], i, j])
+        i = j
+    MAX_ISLAND = 2
+    for k in range(1, len(runs) - 1):
+        spk, s, e = runs[k]
+        if (e - s) <= MAX_ISLAND and runs[k - 1][0] == runs[k + 1][0] and runs[k - 1][0] != spk:
+            for idx in range(s, e):
+                words[idx]["speaker"] = runs[k - 1][0]
+
     # Группируем подряд идущие слова одного спикера в реплики
     turns = []
     cur_spk = words[0]["speaker"]
@@ -716,6 +733,19 @@ def identify_speaker_roles(segments):
                     
     speakers = list(speaker_scores.keys())
     if len(speakers) >= 2:
+        # СИЛЬНЫЙ ПРИОРИТЕТ НАЧАЛА РАЗГОВОРА: фразы, которые на входящем звонке говорит
+        # ТОЛЬКО менеджер (или название компании вместе с приветствием) -> он 100% менеджер.
+        manager_only = ['чем могу помочь', 'чем помочь', 'слушаю вас']
+        greetings = ['здравствуйте', 'добрый день', 'добрый вечер', 'доброе утро']
+        for seg in segments[:4]:
+            txt = normalize_for_analysis(seg.get("text", "").strip())
+            said_manager_phrase = any(p in txt for p in manager_only)
+            said_company_greet = any(c in txt for c in company_keywords) and any(g in txt for g in greetings)
+            if said_manager_phrase or said_company_greet:
+                spk = seg.get("speaker")
+                if spk in speakers:
+                    return spk, (speakers[1] if spk == speakers[0] else speakers[0])
+
         m_diff = abs(speaker_scores[speakers[0]]["manager"] - speaker_scores[speakers[1]]["manager"])
         max_m = max(speaker_scores[speakers[0]]["manager"], speaker_scores[speakers[1]]["manager"])
         if max_m > 0 and m_diff < max_m * 0.25:
@@ -870,9 +900,12 @@ elif st.session_state.current_step == 2:
         else:
             client = OpenAI(api_key=deepseek_key, base_url="https://litellm.tokengate.ru/v1")
             st.write(f"☁️ Используем облачную модель: {analysis_model}")
-        
+
+        batch_start = time.time()
         for i, uploaded_file in enumerate(st.session_state.uploaded_files):
-            status_text.text(f"Обработка {i+1}/{total_files}: {uploaded_file.name}")
+            file_start = time.time()
+            elapsed_so_far = time.time() - batch_start
+            status_text.text(f"⏱️ Обработка {i+1}/{total_files}: {uploaded_file.name} · прошло {elapsed_so_far:.0f} сек")
             
             # --- ВАЖНО: Запоминаем пути, чтобы удалить их в конце ---
             original_temp_path = None
@@ -1125,10 +1158,16 @@ elif st.session_state.current_step == 2:
                         os.remove(padded_temp_path)
                 except Exception as cleanup_err:
                     print(f"⚠️ Не удалось удалить временный файл: {cleanup_err}")
-            
+
+            file_elapsed = time.time() - file_start
+            if st.session_state.processing_results:
+                st.session_state.processing_results[-1]['elapsed'] = file_elapsed
+            total_elapsed = time.time() - batch_start
+            status_text.text(f"✅ {i+1}/{total_files} · {file_elapsed:.0f} сек на файл · всего {total_elapsed:.0f} сек")
             progress_bar.progress((i + 1) / total_files)
             time.sleep(1)
-            
+
+        st.session_state.total_elapsed = time.time() - batch_start
         st.session_state.current_step = 3
         st.rerun()
 
@@ -1161,13 +1200,19 @@ elif st.session_state.current_step == 3:
     successful = [r for r in st.session_state.processing_results if r['status'] == 'success']
     failed = [r for r in st.session_state.processing_results if r['status'] == 'error']
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Всего файлов", len(st.session_state.processing_results))
     with col2:
         st.metric("Успешно", len(successful))
     with col3:
         st.metric("Ошибок", len(failed))
+    with col4:
+        _tot = st.session_state.get("total_elapsed", 0)
+        _n = max(1, len(st.session_state.processing_results))
+        _m, _s = divmod(int(_tot), 60)
+        _tot_str = f"{_m} мин {_s} сек" if _m else f"{_s} сек"
+        st.metric("⏱️ Время обработки", _tot_str, f"~{_tot/_n:.0f} сек/звонок")
     
     if successful:
         def safe_int(val, default=0):
