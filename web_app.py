@@ -77,6 +77,11 @@ OBJECTION_CRITERIA = [
 ]
 OBJ_KEYS = [k for k, _ in OBJECTION_CRITERIA]
 
+def block_score_1_5(analysis, keys):
+    """Балл блока 1-5: 0 действий -> 1, далее = число выполненных действий, потолок 5."""
+    count = sum(int(analysis.get(k, 0) or 0) for k in keys)
+    return max(1, min(count, 5))
+
 def pad_audio_simple_silence(audio_path):
     """
     Самый безопасный хак: ровно 1.0 секунда тишины.
@@ -836,7 +841,7 @@ elif st.session_state.current_step == 2:
 25. "need_other_projects": Узнал о других проектах клиента (иные объекты, будущие потребности).
 
 БЛОК "ВОЗРАЖЕНИЯ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Как менеджер (МОП) отработал возражения и сомнения клиента.
-⚠️ Если клиент НЕ высказывал возражений/сомнений — ставь 1 по всем пунктам 26-32 (отрабатывать было нечего, менеджер ничего не испортил).
+⚠️ Отмечай 1 ТОЛЬКО за реально выполненные действия. Если возражений у клиента не было, большинство пунктов будут 0 — это нормально.
 26. "obj_active_listening": Использовал активное слушание — принял сторону клиента, показал понимание ("понимаю вас", "согласен, это важно").
 27. "obj_no_interrupt": Не перебивал клиента, дал полностью выразить мысль/возражение.
 28. "obj_no_argue": Не спорил с клиентом, не шёл в конфликт (фразы "вы не правы", "это не так" = 0).
@@ -989,12 +994,12 @@ elif st.session_state.current_step == 3:
                                 "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"]
                 
                 total_score = sum(safe_int(analysis.get(k, 0)) for k in binary_fields)
-                need_score = sum(safe_int(analysis.get(k, 0)) for k in NEED_KEYS)
-                obj_score = sum(safe_int(analysis.get(k, 0)) for k in OBJ_KEYS)
+                need_score = block_score_1_5(analysis, NEED_KEYS)
+                obj_score = block_score_1_5(analysis, OBJ_KEYS)
                 is_tech_issue = safe_int(analysis.get("technical_issue", 0)) == 1
                 score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/8"
-                need_display = "Н/О" if is_tech_issue else f"{need_score}/8"
-                obj_display = "Н/О" if is_tech_issue else f"{obj_score}/7"
+                need_display = "Н/О" if is_tech_issue else f"{need_score}/5"
+                obj_display = "Н/О" if is_tech_issue else f"{obj_score}/5"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -1071,15 +1076,9 @@ elif st.session_state.current_step == 3:
                         is_tech_issue = str(analysis.get("technical_issue", "0")).strip() == "1"
                         sheet_score = "Брак связи" if is_tech_issue else total_score
 
-                        # Блок "ПОТРЕБНОСТЬ" — 8 критериев и отдельный балл
-                        need_vals = [int(analysis.get(k, 0)) for k in NEED_KEYS]
-                        need_total = sum(need_vals)
-                        need_sheet_score = "Брак связи" if is_tech_issue else need_total
-
-                        # Блок "ВОЗРАЖЕНИЯ" — 7 критериев и отдельный балл
-                        obj_vals = [int(analysis.get(k, 0)) for k in OBJ_KEYS]
-                        obj_total = sum(obj_vals)
-                        obj_sheet_score = "Брак связи" if is_tech_issue else obj_total
+                        # Блоки "ПОТРЕБНОСТЬ" и "ВОЗРАЖЕНИЯ" — единый балл 1-5 по числу действий
+                        need_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, NEED_KEYS)
+                        obj_block = "Брак связи" if is_tech_issue else block_score_1_5(analysis, OBJ_KEYS)
 
                         row_data = [
                             result['call_date'],
@@ -1101,17 +1100,16 @@ elif st.session_state.current_step == 3:
                             software_proficiency,
                             politeness,
                             call_completion,
-                        ] + need_vals + obj_vals + [
+                            need_block,
+                            obj_block,
                             sheet_score,
-                            need_sheet_score,
-                            obj_sheet_score,
                             analysis.get("recommendations", "")
                         ]
                         all_rows_data.append(row_data)
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:AL{end_row}"
+                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:W{end_row}"
                     
                     body = {'values': all_rows_data}
                     
@@ -1204,34 +1202,34 @@ elif st.session_state.current_step == 4:
 
             st.markdown("---")
             st.markdown("#### 🔎 Блок «Потребность» (выявление ситуации клиента)")
-            need_score = 0
+            need_count = 0
             for label, key in NEED_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
-                need_score += score
+                need_count += score
                 icon = "✅" if score == 1 else "❌"
                 st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
-
+            need_score = max(1, min(need_count, 5))
             if is_tech_issue:
                 st.markdown("### 📊 Потребность: **Н/О (Брак связи)**")
             else:
-                st.markdown(f"### 📊 Потребность: **{need_score}/8**")
-                st.progress(need_score / 8)
+                st.markdown(f"### 📊 Потребность: **{need_score}/5**  _(действий: {need_count})_")
+                st.progress(need_score / 5)
 
             st.markdown("---")
             st.markdown("#### 🛡️ Блок «Возражения» (отработка возражений клиента)")
-            obj_score = 0
+            obj_count = 0
             for label, key in OBJECTION_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
-                obj_score += score
+                obj_count += score
                 icon = "✅" if score == 1 else "❌"
                 st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
-
+            obj_score = max(1, min(obj_count, 5))
             if is_tech_issue:
                 st.markdown("### 📊 Возражения: **Н/О (Брак связи)**")
             else:
-                st.markdown(f"### 📊 Возражения: **{obj_score}/7**")
-                st.progress(obj_score / 7)
+                st.markdown(f"### 📊 Возражения: **{obj_score}/5**  _(действий: {obj_count})_")
+                st.progress(obj_score / 5)
 
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()
