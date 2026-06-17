@@ -579,24 +579,18 @@ def transcribe_with_whisperx_diarization(audio_path, hf_token, model_name="large
         print("🔗 Привязка спикеров...")
         result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        # Точная пословная нарезка реплик (фикс слипания на границах смены спикера).
-        # Если пословной разметки нет — откат на старую посегментную (текущий уровень сохраняется).
-        segments = build_turns_from_words(result)
-        if segments:
-            print(f"🧩 Пословная нарезка: {len(segments)} реплик")
-        else:
-            print("↩️ Откат на посегментную нарезку")
-            segments = []
-            for segment in result["segments"]:
-                speaker = segment.get("speaker", "SPEAKER_00")
-                text = segment.get("text", "").strip()
-                if text:
-                    segments.append({
-                        "speaker": speaker,
-                        "text": text,
-                        "start": segment["start"],
-                        "end": segment["end"]
-                    })
+        # Посегментная нарезка (пословная давала слипание коротких реплик — откатили)
+        segments = []
+        for segment in result["segments"]:
+            speaker = segment.get("speaker", "SPEAKER_00")
+            text = segment.get("text", "").strip()
+            if text:
+                segments.append({
+                    "speaker": speaker,
+                    "text": text,
+                    "start": segment["start"],
+                    "end": segment["end"]
+                })
         
         speaker_manager, speaker_client = identify_speaker_roles(segments)
         print(f"🎭 Роль определена: Менеджер={speaker_manager}, Клиент={speaker_client}")
@@ -733,19 +727,6 @@ def identify_speaker_roles(segments):
                     
     speakers = list(speaker_scores.keys())
     if len(speakers) >= 2:
-        # СИЛЬНЫЙ ПРИОРИТЕТ НАЧАЛА РАЗГОВОРА: фразы, которые на входящем звонке говорит
-        # ТОЛЬКО менеджер (или название компании вместе с приветствием) -> он 100% менеджер.
-        manager_only = ['чем могу помочь', 'чем помочь', 'слушаю вас']
-        greetings = ['здравствуйте', 'добрый день', 'добрый вечер', 'доброе утро']
-        for seg in segments[:4]:
-            txt = normalize_for_analysis(seg.get("text", "").strip())
-            said_manager_phrase = any(p in txt for p in manager_only)
-            said_company_greet = any(c in txt for c in company_keywords) and any(g in txt for g in greetings)
-            if said_manager_phrase or said_company_greet:
-                spk = seg.get("speaker")
-                if spk in speakers:
-                    return spk, (speakers[1] if spk == speakers[0] else speakers[0])
-
         m_diff = abs(speaker_scores[speakers[0]]["manager"] - speaker_scores[speakers[1]]["manager"])
         max_m = max(speaker_scores[speakers[0]]["manager"], speaker_scores[speakers[1]]["manager"])
         if max_m > 0 and m_diff < max_m * 0.25:
