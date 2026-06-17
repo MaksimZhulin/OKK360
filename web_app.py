@@ -477,6 +477,54 @@ def load_align_model(language_code, device):
 
 # =============== ЕДИНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ ===============
 
+def build_turns_from_words(result):
+    """Собирает реплики из ПОСЛОВНОЙ разметки спикеров (точные границы смены спикера).
+    Это убирает слипание фраз, когда один сегмент Whisper охватывает двух людей.
+    Возвращает список {speaker, text} или None — тогда вызывающий код откатывается
+    на старую посегментную нарезку (текущий уровень не деградирует)."""
+    words = []
+    for seg in result.get("segments", []):
+        for w in seg.get("words", []):
+            txt = w.get("word", "")
+            if txt and txt.strip():
+                words.append({"speaker": w.get("speaker"), "word": txt})
+    if not words:
+        return None
+
+    # Заполняем слова без спикера ближайшим известным (вперёд, затем назад)
+    last = None
+    for w in words:
+        if w["speaker"]:
+            last = w["speaker"]
+        elif last:
+            w["speaker"] = last
+    nxt = None
+    for w in reversed(words):
+        if w["speaker"]:
+            nxt = w["speaker"]
+        elif nxt:
+            w["speaker"] = nxt
+    if any(not w["speaker"] for w in words):
+        return None  # разметки спикеров нет вовсе — откат
+
+    # Группируем подряд идущие слова одного спикера в реплики
+    turns = []
+    cur_spk = words[0]["speaker"]
+    buf = [words[0]["word"]]
+    for w in words[1:]:
+        if w["speaker"] == cur_spk:
+            buf.append(w["word"])
+        else:
+            text = " ".join(s.strip() for s in buf if s.strip())
+            if text:
+                turns.append({"speaker": cur_spk, "text": text})
+            cur_spk = w["speaker"]
+            buf = [w["word"]]
+    text = " ".join(s.strip() for s in buf if s.strip())
+    if text:
+        turns.append({"speaker": cur_spk, "text": text})
+    return turns or None
+
 def transcribe_with_whisperx_diarization(audio_path, hf_token, model_name="large-v3", min_speakers=2, max_speakers=2):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
@@ -513,18 +561,25 @@ def transcribe_with_whisperx_diarization(audio_path, hf_token, model_name="large
         
         print("🔗 Привязка спикеров...")
         result = whisperx.assign_word_speakers(diarize_segments, result)
-        
-        segments = []
-        for segment in result["segments"]:
-            speaker = segment.get("speaker", "SPEAKER_00")
-            text = segment.get("text", "").strip()
-            if text:
-                segments.append({
-                    "speaker": speaker,
-                    "text": text,
-                    "start": segment["start"],
-                    "end": segment["end"]
-                })
+
+        # Точная пословная нарезка реплик (фикс слипания на границах смены спикера).
+        # Если пословной разметки нет — откат на старую посегментную (текущий уровень сохраняется).
+        segments = build_turns_from_words(result)
+        if segments:
+            print(f"🧩 Пословная нарезка: {len(segments)} реплик")
+        else:
+            print("↩️ Откат на посегментную нарезку")
+            segments = []
+            for segment in result["segments"]:
+                speaker = segment.get("speaker", "SPEAKER_00")
+                text = segment.get("text", "").strip()
+                if text:
+                    segments.append({
+                        "speaker": speaker,
+                        "text": text,
+                        "start": segment["start"],
+                        "end": segment["end"]
+                    })
         
         speaker_manager, speaker_client = identify_speaker_roles(segments)
         print(f"🎭 Роль определена: Менеджер={speaker_manager}, Клиент={speaker_client}")
