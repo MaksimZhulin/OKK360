@@ -51,6 +51,20 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from auto_learning import save_to_knowledge_base, calculate_confidence, find_similar_calls, get_database_stats
 
+# === Критерии блока "ПОТРЕБНОСТЬ" (выявление ситуации клиента) ===
+# (ключ для JSON/таблицы, подпись для интерфейса)
+NEED_CRITERIA = [
+    ("need_purpose",            "Узнал цель покупки клиента"),
+    ("need_project_details",    "Узнал детали проекта клиента"),
+    ("need_geography",          "Узнал географию работ / объект"),
+    ("need_supplier_criteria",  "Узнал критерии выбора поставщика"),
+    ("need_interaction_terms",  "Узнал условия взаимодействия"),
+    ("need_purchase_frequency", "Узнал частоту закупок"),
+    ("need_competitors",        "Выявил конкурентов / предложения"),
+    ("need_other_projects",     "Узнал о других проектах клиента"),
+]
+NEED_KEYS = [k for k, _ in NEED_CRITERIA]
+
 def pad_audio_simple_silence(audio_path):
     """
     Самый безопасный хак: ровно 1.0 секунда тишины.
@@ -799,6 +813,16 @@ elif st.session_state.current_step == 2:
 16. "politeness": Вежливость. (1 = тактично, 0 = грубо/сухо).
 17. "call_completion": Закрытие сделки / Следующий шаг. (1 = назначен твердый следующий шаг, 0 = звонок завершен 'в никуда').
 
+БЛОК "ПОТРЕБНОСТЬ" (Оценивай строго: 1 = ДА, 0 = НЕТ). Насколько глубоко менеджер выявил ситуацию клиента. Ставь 1 ТОЛЬКО если в разговоре это реально прозвучало:
+18. "need_purpose": Узнал цель покупки клиента (например, стройка, ремонт, перепродажа, производство).
+19. "need_project_details": Узнал детали проекта клиента (например, строительство коттеджного поселка, объём, что именно делают).
+20. "need_geography": Узнал географию работ или расположение объекта (город, регион, адрес доставки).
+21. "need_supplier_criteria": Узнал критерии выбора поставщика — что важно клиенту (цена, сроки, логистика, качество, наличие).
+22. "need_interaction_terms": Узнал условия взаимодействия (оплата по счёту, отсрочка, форма оплаты, документы).
+23. "need_purchase_frequency": Узнал частоту закупок (разовая покупка или регулярные поставки).
+24. "need_competitors": Выявил конкурентов или конкурентные предложения (где ещё смотрел, какие цены называли).
+25. "need_other_projects": Узнал о других проектах клиента (иные объекты, будущие потребности).
+
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
                 response = client.chat.completions.create(model=analysis_model, messages=[
@@ -834,7 +858,7 @@ elif st.session_state.current_step == 2:
                 
                 required_fields = ["topic", "call_type", "technical_issue", "client_request", "solution", "urgency", "client_mood", "manager_actions", "recommendations",
                                     "establishing_contact", "client_type", "clarifying_questions",
-                                    "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"]
+                                    "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"] + NEED_KEYS
 
                 for field in required_fields:
                     if field not in analysis_result:
@@ -843,7 +867,7 @@ elif st.session_state.current_step == 2:
                 binary_fields = ["establishing_contact", "client_type", "clarifying_questions",
                                 "knowledge_quality", "contact_exchange", "software_proficiency", "call_completion", "politeness"]
 
-                for field in binary_fields:
+                for field in binary_fields + NEED_KEYS:
                     if field in analysis_result:
                         try:
                             val = analysis_result[field]
@@ -943,8 +967,10 @@ elif st.session_state.current_step == 3:
                                 "knowledge_quality", "contact_exchange", "software_proficiency", "politeness", "call_completion"]
                 
                 total_score = sum(safe_int(analysis.get(k, 0)) for k in binary_fields)
+                need_score = sum(safe_int(analysis.get(k, 0)) for k in NEED_KEYS)
                 is_tech_issue = safe_int(analysis.get("technical_issue", 0)) == 1
                 score_display = "Н/О (Брак связи)" if is_tech_issue else f"{total_score}/8"
+                need_display = "Н/О" if is_tech_issue else f"{need_score}/8"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -955,6 +981,7 @@ elif st.session_state.current_step == 3:
                 st.write(f"  📞 Тип звонка: {type_badge}")
                 st.write(f"  🎯 Тема: {result['analysis'].get('topic', '—')}")
                 st.write(f"  ⭐ Оценка: {score_display}")
+                st.write(f"  🔎 Потребность: {need_display}")
                 st.write("---")
     
     if failed:
@@ -1019,18 +1046,23 @@ elif st.session_state.current_step == 3:
                         is_tech_issue = str(analysis.get("technical_issue", "0")).strip() == "1"
                         sheet_score = "Брак связи" if is_tech_issue else total_score
 
+                        # Блок "ПОТРЕБНОСТЬ" — 8 критериев и отдельный балл
+                        need_vals = [int(analysis.get(k, 0)) for k in NEED_KEYS]
+                        need_total = sum(need_vals)
+                        need_sheet_score = "Брак связи" if is_tech_issue else need_total
+
                         row_data = [
                             result['call_date'],
                             result['operator_name'],
                             result['base_name'],
                             result['transcript'][:99000],
                             upload_date,
-                            result['analysis'].get("topic", ""),
-                            result['analysis'].get("client_request", ""),
-                            result['analysis'].get("solution", ""),
-                            result['analysis'].get("urgency", ""),
-                            result['analysis'].get("client_mood", ""),
-                            result['analysis'].get("manager_actions", ""),
+                            analysis.get("topic", ""),
+                            analysis.get("client_request", ""),
+                            analysis.get("solution", ""),
+                            analysis.get("urgency", ""),
+                            analysis.get("client_mood", ""),
+                            analysis.get("manager_actions", ""),
                             establishing_contact,
                             client_type,
                             clarifying_questions,
@@ -1039,14 +1071,16 @@ elif st.session_state.current_step == 3:
                             software_proficiency,
                             politeness,
                             call_completion,
+                        ] + need_vals + [
                             sheet_score,
-                            result['analysis'].get("recommendations", "")
+                            need_sheet_score,
+                            analysis.get("recommendations", "")
                         ]
                         all_rows_data.append(row_data)
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:U{end_row}"
+                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:AD{end_row}"
                     
                     body = {'values': all_rows_data}
                     
@@ -1136,5 +1170,21 @@ elif st.session_state.current_step == 4:
                     st.warning("Средний результат.")
                 else:
                     st.error("Требуется обучение.")
-        
+
+            st.markdown("---")
+            st.markdown("#### 🔎 Блок «Потребность» (выявление ситуации клиента)")
+            need_score = 0
+            for label, key in NEED_CRITERIA:
+                value = result['analysis'].get(key, 0)
+                score = 1 if value == 1 else 0
+                need_score += score
+                icon = "✅" if score == 1 else "❌"
+                st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
+
+            if is_tech_issue:
+                st.markdown("### 📊 Потребность: **Н/О (Брак связи)**")
+            else:
+                st.markdown(f"### 📊 Потребность: **{need_score}/8**")
+                st.progress(need_score / 8)
+
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()
