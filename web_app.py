@@ -199,6 +199,34 @@ WHISPER_DOMAIN_PROMPT = (
 )
 
 
+# ---- Стоимость ИИ-анализа (по реальным токенам из ответа LLM) ----
+# Тарифы tokengate/LiteLLM за 1000 токенов (вход/выход).
+# ⚠️ ПОСТАВЬ СВОИ РЕАЛЬНЫЕ ТАРИФЫ — значения ниже ПРИМЕРНЫЕ.
+COST_CURRENCY = "₽"
+LLM_PRICES = {
+    "google/gemini-2.5-flash": {"in": 0.03, "out": 0.25},
+    "deepseek/deepseek-chat":  {"in": 0.05, "out": 0.20},
+    "openai/gpt-4o":           {"in": 0.55, "out": 2.20},
+    "mistralai/mistral-nemo":  {"in": 0.02, "out": 0.05},
+}
+LLM_PRICE_DEFAULT = {"in": 0.05, "out": 0.20}
+
+
+def add_llm_cost(model, response):
+    """Считает стоимость вызова по usage (реальные токены с платформы) и копит
+    её в session_state для текущего файла. Вызывать после каждого запроса к LLM."""
+    try:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        p = LLM_PRICES.get(model, LLM_PRICE_DEFAULT)
+        cost = (usage.prompt_tokens / 1000.0) * p["in"] + \
+               (usage.completion_tokens / 1000.0) * p["out"]
+        st.session_state["_file_llm_cost"] = st.session_state.get("_file_llm_cost", 0.0) + cost
+    except Exception as e:
+        print(f"⚠️ Учёт стоимости: {e}")
+
+
 def preprocess_audio(audio_path):
     """МИНИМАЛЬНАЯ и БЕЗОПАСНАЯ предобработка звука: только громкостная нормализация
     и срез суб-баса. НИКОГДА не вырезает тишину/речь (никакого VAD/шумодава),
@@ -428,8 +456,10 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
             max_tokens=4000
         )
         
+        if not local_mode:
+            add_llm_cost(analysis_model, response)
         corrected_text = response.choices[0].message.content.strip()
-        
+
         if "Менеджер:" in corrected_text or "Клиент:" in corrected_text:
             return corrected_text
         else:
@@ -487,8 +517,10 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
             max_tokens=4000
         )
         
+        if not local_mode:
+            add_llm_cost(analysis_model, response)
         corrected_text = response.choices[0].message.content.strip()
-        
+
         if "👨‍💼 Менеджер:" in corrected_text and "👤 Клиент:" in corrected_text:
             return corrected_text
         else:
@@ -947,6 +979,7 @@ elif st.session_state.current_step == 2:
             cleaned_temp_path = None
 
             try:
+                st.session_state["_file_llm_cost"] = 0.0  # копим стоимость LLM за файл
                 os.makedirs("recordings", exist_ok=True)
                 
                 # Уникальное имя (спасет от ошибки Errno 13)
@@ -1112,6 +1145,8 @@ elif st.session_state.current_step == 2:
                     {"role": "user", "content": prompt}
                 ], temperature=0.3, max_tokens=2500)
 
+                if not local_mode:
+                    add_llm_cost(analysis_model, response)
                 result_text = response.choices[0].message.content.strip()
                 json_start = result_text.find('{')
                 json_end = result_text.rfind('}')
@@ -1199,7 +1234,8 @@ elif st.session_state.current_step == 2:
                 st.session_state.processing_results.append({
                     'filename': filename, 'base_name': base_name, 'call_date': call_date,
                     'operator_name': formatted_name, 'transcript': transcript_text,
-                    'analysis': analysis_result, 'status': 'success'
+                    'analysis': analysis_result, 'status': 'success',
+                    'cost': st.session_state.get("_file_llm_cost", 0.0)
                 })
             except Exception as e:
                 st.session_state.processing_results.append({'filename': uploaded_file.name, 'status': 'error', 'error': str(e)})
@@ -1257,7 +1293,7 @@ elif st.session_state.current_step == 3:
     successful = [r for r in st.session_state.processing_results if r['status'] == 'success']
     failed = [r for r in st.session_state.processing_results if r['status'] == 'error']
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Всего файлов", len(st.session_state.processing_results))
     with col2:
@@ -1270,6 +1306,11 @@ elif st.session_state.current_step == 3:
         _m, _s = divmod(int(_tot), 60)
         _tot_str = f"{_m} мин {_s} сек" if _m else f"{_s} сек"
         st.metric("⏱️ Время обработки", _tot_str, f"~{_tot/_n:.0f} сек/звонок")
+    with col5:
+        _cost_tot = sum(r.get('cost', 0.0) for r in successful)
+        _cn = max(1, len(successful))
+        st.metric("💰 Стоимость ИИ", f"{_cost_tot:.2f} {COST_CURRENCY}",
+                  f"~{_cost_tot/_cn:.2f} {COST_CURRENCY}/звонок")
     
     if successful:
         def safe_int(val, default=0):
@@ -1325,6 +1366,9 @@ elif st.session_state.current_step == 3:
                 st.write(f"  📇 Кл/счёт (контакты): {contact_display}")
                 st.write(f"  ➡️ Следующий шаг: {nextstep_display}")
                 st.write(f"  🗣️ Речь: {speech_display}")
+                _fcost = result.get('cost', 0.0)
+                if _fcost:
+                    st.write(f"  💰 Стоимость ИИ: {_fcost:.2f} {COST_CURRENCY}")
                 st.write("---")
     
     if failed:
