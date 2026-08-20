@@ -213,8 +213,10 @@ elif st.session_state.current_step == 2:
                     if not WHISPERX_AVAILABLE: raise Exception("WhisperX не установлен")
                     
                     st.write("🔧 Используем WhisperX + PyAnnote (диаризация)")
+                    _t_tr = time.time()
                     transcript_text = transcribe_with_whisperx_diarization(temp_filename, hf_token)
-                    
+                    print(f"⏱️ [{uploaded_file.name}] транскрибация WhisperX: {time.time() - _t_tr:.0f} сек")
+
                     if "❌" in transcript_text:
                         raise Exception(transcript_text)
                     

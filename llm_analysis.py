@@ -3,7 +3,6 @@
 Работа с LLM: коррекция терминов и ролей спикеров, учёт стоимости вызовов.
 Вынесено из web_app.py.
 """
-import json
 import streamlit as st
 
 from config import LLM_BASE_URL
@@ -51,15 +50,14 @@ def add_llm_cost(model, response):
     Приоритет: готовая стоимость из ответа tokengate (если есть) -> иначе по токенам.
     Вызывать после каждого запроса к LLM."""
     try:
-        # Диагностика: печатаем сырой ответ, чтобы видеть, что реально приходит
+        # Диагностика: печатаем только служебные поля ответа (без тяжёлой сериализации
+        # всего тела). Цель — увидеть, есть ли готовая стоимость от tokengate.
         if SHOW_RAW_LLM:
-            try:
-                raw = response.model_dump()
-            except Exception:
-                raw = {"repr": str(response)}
-            # прячем текст ответа, чтобы не засорять лог — оставляем только служебное
-            raw.pop("choices", None)
-            print(f"💰 [LLM raw] {json.dumps(raw, ensure_ascii=False, default=str)[:1500]}")
+            usage = getattr(response, "usage", None)
+            hp = getattr(response, "_hidden_params", None)
+            extra = getattr(response, "model_extra", None)
+            print(f"💰 [LLM] usage={usage} | hidden_params={hp} | extra_keys="
+                  f"{list(extra.keys()) if isinstance(extra, dict) else extra}")
 
         real = _extract_real_cost(response)
         if real is not None:
