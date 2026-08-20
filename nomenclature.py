@@ -60,6 +60,15 @@ SLANG = {
 
 STOP_TOKENS = {"и", "в", "с", "на", "для", "из", "по", "от", "до", "мм", "м", "см", "шт", "тн", "т", "кг"}
 
+# Все написания Б/У -> единый токен "бу". Добавляй сюда новые формы, если встретятся.
+BU_SPELLINGS = [
+    r"\bбэ?ушн\w*",                     # бушный, бэушный, бэушные, бушные...
+    r"\bб\s*/?\s*у\b",                   # "б/у", "б у", "б\у"
+    r"\bподержанн\w*",                   # подержанный, подержанные
+    r"\bбывш\w+\s+в\s+употреблен\w+",   # бывшие в употреблении
+]
+_BU_RE = re.compile("|".join(BU_SPELLINGS))
+
 # «Голые» слова-категории для fallback-словаря: применяем только если точного нет.
 GENERIC_ALIAS_KEYS = {"труба", "лист", "листовой металл"}
 
@@ -96,7 +105,7 @@ def num_tokens(norm_text: str):
 
 
 def _apply_slang(norm_text: str) -> str:
-    t = norm_text
+    t = _BU_RE.sub("бу", norm_text)   # бэушные/б-у/подержанные -> "бу"
     for word, num in SIZE_WORDS.items():
         t = re.sub(rf"\b{word}\b", num, t)
     for slang, canon in SLANG.items():
@@ -238,6 +247,8 @@ def _match_tags(m_norm, m_ctokens, m_size, m_markers, threshold):
         e_all = set(e["norm"].split())
         if (e_all & SPECIALIZED_MARKERS) - m_markers:
             base *= 0.5
+        if "бу" in m_markers and "бу" not in e_all:   # клиент просит БУ, а позиция новая
+            base *= 0.4
         base *= _accessory_penalty(m_ctokens, e["norm"])
         # фактор размера
         tag_sizes = set(e.get("nums", []))
@@ -298,8 +309,11 @@ def _match_catalog(m_norm, m_ctokens, m_markers, threshold):
         best, best_score = None, 0.0
         for e in candidates:
             s = _product_score(m_ctokens, m_norm, e["_ctokens"], e["norm"])
-            if (set(e["norm"].split()) & SPECIALIZED_MARKERS) - m_markers:
+            _e_all = set(e["norm"].split())
+            if (_e_all & SPECIALIZED_MARKERS) - m_markers:
                 s *= 0.5
+            if "бу" in m_markers and "бу" not in _e_all:   # клиент просит БУ, а позиция новая
+                s *= 0.4
             s *= _accessory_penalty(m_ctokens, e["norm"])
             if s > best_score or (abs(s - best_score) < 1e-9 and best and e["level"] < best["level"]):
                 best, best_score = e, s
@@ -352,7 +366,7 @@ def match_one(mention, tag_threshold=0.5, cat_threshold=0.55):
 
     # Голое "труба 140" / "лист 3" (тип не назван) — не ловим конкретный тег/позицию
     # (иначе улетает в "Труба обсадная/бесшовная 140"). Идём СРАЗУ в общую категорию.
-    if m_ctokens and set(m_ctokens) <= GENERIC_NOUNS:
+    if m_ctokens and set(m_ctokens) <= GENERIC_NOUNS and "бу" not in m_markers:
         hit = _match_generic_alias(m_norm)
     else:
         hit = _match_tags(m_norm, m_ctokens, m_size, m_markers, tag_threshold)
