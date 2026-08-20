@@ -338,35 +338,112 @@ def match_one(mention, tag_threshold=0.5, cat_threshold=0.55):
     return result
 
 
+_UNIT_RE = re.compile(r"(мм|см|дюйм|шт|м)$")
+
+
+def _is_size_tok(tok):
+    """Токен-размер: число (возможно с единицей/составное): 8, 8мм, 40x20x2, 2.5."""
+    core = _UNIT_RE.sub("", tok).replace(",", ".")
+    return bool(re.fullmatch(r"\d+(?:\.\d+)?(?:[xх*]\d+(?:\.\d+)?)*", core))
+
+
+def _is_grade_tok(tok):
+    """Токен-марка сплава/стали: буквы И цифры вместе (ад31т1, а500с, амг5, 09г2с),
+    но НЕ число с единицей (8мм — это размер, не марка)."""
+    core = _UNIT_RE.sub("", tok)
+    return (len(core) >= 2 and re.search(r"[а-яa-z]", core) and re.search(r"\d", core)
+            and not core.replace(".", "").isdigit())
+
+
+def _split_size_grade(m_norm):
+    """Если в упоминании есть И размер, И марка сплава — вернуть под-запросы
+    [база+размер, база+марка1, ...], чтобы выдать отдельный тег на размер и на сплав.
+    Иначе None (обычный одиночный матчинг)."""
+    toks = m_norm.split()
+    size_toks = [t for t in toks if _is_size_tok(t)]
+    grade_toks = [t for t in toks if _is_grade_tok(t)]
+    if not size_toks or not grade_toks:
+        return None
+    drop = (set(size_toks) | set(grade_toks) |
+            {"сплав", "марка", "мм", "см", "м", "либо", "или", "и", "а"})
+    base = [t for t in toks if t not in drop]
+    if not base:
+        return None
+    base_str = " ".join(base)
+    size_core = _UNIT_RE.sub("", size_toks[0]).replace(",", ".")
+    return [f"{base_str} {size_core}"] + [f"{base_str} {g}" for g in grade_toks]
+
+
 def match_mentions(mentions, tag_threshold=0.5, cat_threshold=0.55):
     if not mentions:
         return []
     if isinstance(mentions, str):
         mentions = [mentions]
     out, seen = [], set()
-    for m in mentions:
-        r = match_one(m, tag_threshold=tag_threshold, cat_threshold=cat_threshold)
-        key = (r["kind"], r["name"]) if r["matched"] else ("raw", normalize(r["raw"]))
-        if not r["raw"] or key in seen:
-            continue
-        seen.add(key)
-        out.append(r)
+    for gi, m in enumerate(mentions):
+        raw = (m or "").strip()
+        m_norm = _apply_slang(normalize(raw))
+        queries = _split_size_grade(m_norm)
+        if queries:
+            results = [match_one(q, tag_threshold, cat_threshold) for q in queries]
+            results = [r for r in results if r["matched"]]
+            if not results:  # ничего не разошлось — обычный матчинг всей строки
+                results = [match_one(raw, tag_threshold, cat_threshold)]
+        else:
+            results = [match_one(raw, tag_threshold, cat_threshold)]
+        for r in results:
+            key = (r["kind"], r["name"]) if r["matched"] else ("raw", normalize(r["raw"]))
+            if not r["raw"] or key in seen:
+                continue
+            seen.add(key)
+            r["group"] = gi   # позиции из одного упоминания — одна группа
+            out.append(r)
     return out
 
 
+def _common_prefix_tokens(names):
+    """Общая начальная последовательность слов у всех названий группы."""
+    toks = [n.split() for n in names]
+    common = []
+    for i in range(min(len(t) for t in toks)):
+        if len({t[i] for t in toks}) == 1:
+            common.append(toks[0][i])
+        else:
+            break
+    return common
+
+
 def format_nomenclature(items):
-    """Читаемый вывод: если определён тег — сам тег; если только категория — категория;
-    если не определить ничего — 'Не определена'.
-    Пример: 'Заглушка желоба 200 мм; Стальная арматура'."""
-    names, seen = [], set()
+    """Читаемый вывод. Позиции из одного упоминания группируются: общее название
+    товара — один раз, отличия (размер/сплав) через '; '. Разные товары — через ' | '.
+    Пример: 'Алюминиевая труба; 40 мм; АД31Т1 | Двутавр №20'. Иначе — 'Не определена'."""
+    # группируем по номеру упоминания, сохраняя порядок появления
+    order, groups = [], {}
     for it in items:
-        if not it.get("matched"):
+        if not it.get("matched") or not it.get("name"):
             continue
-        name = it.get("name")
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return "; ".join(names) if names else "Не определена"
+        g = it.get("group", ("solo", it["name"]))
+        if g not in groups:
+            groups[g] = []
+            order.append(g)
+        if it["name"] not in groups[g]:
+            groups[g].append(it["name"])
+
+    blocks = []
+    for g in order:
+        names = groups[g]
+        if len(names) == 1:
+            blocks.append(names[0])
+            continue
+        common = _common_prefix_tokens(names)
+        if common:
+            base = " ".join(common)
+            tails = [" ".join(n.split()[len(common):]) for n in names]
+            tails = [t for t in tails if t]  # пустые (когда имя == база) убираем
+            blocks.append("; ".join([base] + tails))
+        else:
+            blocks.append("; ".join(names))
+    return " | ".join(blocks) if blocks else "Не определена"
 
 
 def extract_mentions_llm(transcript_text, client, model, local_mode=False):
