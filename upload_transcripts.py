@@ -6,17 +6,13 @@ from googleapiclient.discovery import build
 import glob
 
 # ============== НАСТРОЙКИ ==============
-# 1. Пути к файлам
-CREDENTIALS_FILE = 'credentials.json'
+# Общие значения (ID таблицы, credentials, имя листа) — в config.py
+from config import CREDENTIALS_FILE, SPREADSHEET_ID, SHEET_NAME
+
+# Пути к файлам (специфичны для этого скрипта)
 TRANSCRIPTS_FOLDER = 'transcripts'
 PROCESSED_FOLDER = 'processed'
 LOG_FILE = 'upload_log.txt'
-
-# 2. ID вашей Google Таблицы
-SPREADSHEET_ID = "1Oe-dKF_0oPhCdlwcj6jeco7BSIBi37jPuO3rSG4C930"
-
-# 3. Настройки таблицы
-SHEET_NAME = "'Выгрузка из проекта'"  # Название листа в таблице (в кавычках — есть пробелы)
 # =======================================
 
 def setup_folders():

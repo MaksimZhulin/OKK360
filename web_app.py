@@ -18,6 +18,7 @@ import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from auto_learning import save_to_knowledge_base, calculate_confidence, find_similar_calls, get_database_stats
+from config import SPREADSHEET_ID, CREDENTIALS_FILE, SHEET_NAME, SHEET_TITLE, LLM_BASE_URL
 from audio import (
     WHISPERX_AVAILABLE, preprocess_audio, pad_audio_simple_silence,
     transcribe_with_yandex, transcribe_with_whisperx_diarization,
@@ -163,7 +164,7 @@ elif st.session_state.current_step == 2:
             client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
             st.write("🏠 Используем локальную модель: mistral-nemo")
         else:
-            client = OpenAI(api_key=deepseek_key, base_url="https://litellm.tokengate.ru/v1")
+            client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
             st.write(f"☁️ Используем облачную модель: {analysis_model}")
 
         batch_start = time.time()
@@ -593,14 +594,12 @@ elif st.session_state.current_step == 3:
             with st.spinner("Сохраняю в таблицу..."):
                 try:
                     credentials = service_account.Credentials.from_service_account_file(
-                        'credentials.json',
+                        CREDENTIALS_FILE,
                         scopes=['https://www.googleapis.com/auth/spreadsheets']
                     )
                     service = build('sheets', 'v4', credentials=credentials)
-                    
-                    SPREADSHEET_ID = "1Oe-dKF_0oPhCdlwcj6jeco7BSIBi37jPuO3rSG4C930"
-                    
-                    range_to_check = "'Выгрузка из проекта'!A:A"
+
+                    range_to_check = f"{SHEET_NAME}!A:A"
                     result_sheets = service.spreadsheets().values().get(
                         spreadsheetId=SPREADSHEET_ID,
                         range=range_to_check
@@ -683,7 +682,7 @@ elif st.session_state.current_step == 3:
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:Z{end_row}"
+                    range_to_write = f"{SHEET_NAME}!A{start_row}:Z{end_row}"
 
                     # Гарантируем, что в листе достаточно строк (иначе update упадёт
                     # с "exceeds grid limits"). При нехватке — докидываем строки с запасом.
@@ -694,7 +693,7 @@ elif st.session_state.current_step == 3:
                         ).execute()
                         sheet_id, current_rows = None, 0
                         for sh in meta.get('sheets', []):
-                            if sh['properties']['title'] == 'Выгрузка из проекта':
+                            if sh['properties']['title'] == SHEET_TITLE:
                                 sheet_id = sh['properties']['sheetId']
                                 current_rows = sh['properties']['gridProperties']['rowCount']
                                 break

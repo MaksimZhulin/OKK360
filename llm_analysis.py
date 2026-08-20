@@ -5,6 +5,8 @@
 """
 import streamlit as st
 
+from config import LLM_BASE_URL
+
 
 COST_CURRENCY = "₽"
 LLM_PRICES = {
@@ -36,7 +38,7 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
     if local_mode:
         client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
     else:
-        client = OpenAI(api_key=deepseek_key, base_url="https://litellm.tokengate.ru/v1")
+        client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
     
     prompt = f"""Исправь ошибки транскрибации в тексте звонка. 
     Особенно обрати внимание на названия компаний и термины.
@@ -101,7 +103,7 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
     if local_mode:
         client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
     else:
-        client = OpenAI(api_key=deepseek_key, base_url="https://litellm.tokengate.ru/v1")
+        client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
     
     prompt = f"""Перед тобой транскрипция телефонного звонка в компанию "СтальМетУрал". 
 Из-за технических особенностей записи нейросеть могла:

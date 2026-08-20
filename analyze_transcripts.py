@@ -11,10 +11,8 @@ import openai
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = "google/gemini-2.5-flash"
 
-# 2. Google Таблица
-CREDENTIALS_FILE = 'credentials.json'
-SPREADSHEET_ID = "1Oe-dKF_0oPhCdlwcj6jeco7BSIBi37jPuO3rSG4C930"
-SHEET_NAME = "'Выгрузка из проекта'"
+# 2. Google Таблица + LLM-эндпоинт (значения вынесены в config.py)
+from config import CREDENTIALS_FILE, SPREADSHEET_ID, SHEET_NAME, LLM_BASE_URL
 
 # 3. Настройки анализа
 MAX_TOKENS = 4000
@@ -24,7 +22,7 @@ def setup_deepseek():
     """Настраивает клиент DeepSeek"""
     client = openai.OpenAI(
         api_key=DEEPSEEK_API_KEY,
-        base_url="https://litellm.tokengate.ru/v1"
+        base_url=LLM_BASE_URL
     )
     return client
 
