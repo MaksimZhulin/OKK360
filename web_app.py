@@ -186,6 +186,47 @@ def build_recommendation(analysis):
         rec += f" Комментарий ИИ: {note}"
     return rec
 
+# Доменная подсказка для Whisper (initial_prompt) — биасит распознавание к нашим
+# терминам ДО распознавания, чтобы он сразу писал "двутавр"/"А500С"/"СтальМетУрал",
+# а не кашу. Дополняет (не заменяет) постобработку smart_text_correction.
+WHISPER_DOMAIN_PROMPT = (
+    "Разговор менеджера компании СтальМетУрал (СМУ) с клиентом о металлопрокате. "
+    "Термины: арматура А500С, А240, А400, двутавр, балка, швеллер, уголок, "
+    "лист горячекатаный, лист оцинкованный, круг, квадрат, полоса, шестигранник, "
+    "труба профильная, труба ВГП, труба бесшовная, труба ПНД, профнастил, "
+    "проволока, катанка, сетка кладочная, оцинковка, нержавейка, "
+    "толщина, диаметр, миллиметр, тонна, ГОСТ, счёт, отсрочка, доставка, самовывоз."
+)
+
+
+def preprocess_audio(audio_path):
+    """МИНИМАЛЬНАЯ и БЕЗОПАСНАЯ предобработка звука: только громкостная нормализация
+    и срез суб-баса. НИКОГДА не вырезает тишину/речь (никакого VAD/шумодава),
+    поэтому фрагменты речи не могут потеряться. Возвращает путь к очищенному wav
+    или исходный путь при любой ошибке."""
+    import subprocess
+    import shutil
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        print("⚠️ ffmpeg не найден — пропускаю предобработку")
+        return audio_path
+
+    out_path = audio_path + ".clean.wav"
+    # highpass=80 — режет только гул ниже человеческого голоса;
+    # loudnorm — выравнивает громкость (тихого менеджера станет слышно).
+    filters = "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11"
+    cmd = [ffmpeg, "-y", "-i", audio_path, "-af", filters,
+           "-ar", "16000", "-ac", "1", out_path]
+    try:
+        st.write("🧹 Предобработка звука (нормализация громкости)...")
+        subprocess.run(cmd, check=True, capture_output=True)
+        return out_path
+    except Exception as e:
+        print(f"⚠️ Предобработка не удалась, беру оригинал: {e}")
+        return audio_path
+
+
 def pad_audio_simple_silence(audio_path, pad_seconds=2.0):
     """
     Добавляет тишину в начало файла, сдвигая первое слово из "мёртвой зоны"
@@ -461,13 +502,15 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
 
 @st.cache_resource(show_spinner="Загрузка WhisperX в память...")
 def load_whisperx_model(model_name, device, compute_type):
-    """Загружает и кеширует основную модель WhisperX"""
+    """Загружает и кеширует основную модель WhisperX.
+    initial_prompt (доменный словарь) биасит распознавание к нашим терминам."""
     print(f"🔧 [Cache] Загрузка WhisperX модели {model_name} на {device}...")
     model = whisperx.load_model(
-        model_name, 
-        device, 
-        compute_type=compute_type, 
-        language="ru"
+        model_name,
+        device,
+        compute_type=compute_type,
+        language="ru",
+        asr_options={"initial_prompt": WHISPER_DOMAIN_PROMPT}
     )
     return model
 
@@ -801,6 +844,13 @@ with st.sidebar:
         index=0,
         key="transcription_method_select"
     )
+    st.checkbox(
+        "🧹 Предобработка звука (нормализация громкости)",
+        value=True,
+        key="preprocess_audio_checkbox",
+        help="Безопасно: выравнивает громкость и режет суб-бас гул. НЕ вырезает речь. "
+             "Работает для WhisperX. Сними галочку, чтобы сравнить до/после."
+    )
     
     hf_token = ""
     yandex_api_key = ""
@@ -894,7 +944,8 @@ elif st.session_state.current_step == 2:
             # --- ВАЖНО: Запоминаем пути, чтобы удалить их в конце ---
             original_temp_path = None
             padded_temp_path = None
-            
+            cleaned_temp_path = None
+
             try:
                 os.makedirs("recordings", exist_ok=True)
                 
@@ -907,9 +958,15 @@ elif st.session_state.current_step == 2:
                 time.sleep(0.5)
                 
                 temp_filename = original_temp_path
-                # --- ЛЕЧИМ ОБРЕЗКУ НАЧАЛА ---
+                # --- ПРЕДОБРАБОТКА + ЛЕЧИМ ОБРЕЗКУ НАЧАЛА (только WhisperX) ---
                 if "WhisperX" in transcription_method:
-                    temp_filename = pad_audio_simple_silence(original_temp_path)
+                    src_for_pad = original_temp_path
+                    if st.session_state.get("preprocess_audio_checkbox", True):
+                        cleaned = preprocess_audio(original_temp_path)
+                        if cleaned != original_temp_path:
+                            cleaned_temp_path = cleaned  # временный, удалим в finally
+                            src_for_pad = cleaned
+                    temp_filename = pad_audio_simple_silence(src_for_pad)
                     padded_temp_path = temp_filename # Запоминаем созданный дубль
                 # ----------------------------
                 
@@ -1154,6 +1211,8 @@ elif st.session_state.current_step == 2:
                         os.remove(original_temp_path)
                     if padded_temp_path and os.path.exists(padded_temp_path):
                         os.remove(padded_temp_path)
+                    if cleaned_temp_path and os.path.exists(cleaned_temp_path):
+                        os.remove(cleaned_temp_path)
                 except Exception as cleanup_err:
                     print(f"⚠️ Не удалось удалить временный файл: {cleanup_err}")
 
