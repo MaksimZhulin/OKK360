@@ -283,24 +283,28 @@ def _match_catalog(m_norm, m_ctokens, m_markers, threshold):
     if hit:
         return hit
 
-    cand = set()
-    for t in m_ctokens:
-        cand |= prefix_index.get(t[:4], set())
-    candidates = [entries[i] for i in cand] if cand else entries
-    best, best_score = None, 0.0
-    for e in candidates:
-        s = _product_score(m_ctokens, m_norm, e["_ctokens"], e["norm"])
-        if (set(e["norm"].split()) & SPECIALIZED_MARKERS) - m_markers:
-            s *= 0.5
-        s *= _accessory_penalty(m_ctokens, e["norm"])
-        if s > best_score or (abs(s - best_score) < 1e-9 and best and e["level"] < best["level"]):
-            best, best_score = e, s
-    if best and best_score >= threshold:
-        return {
-            "kind": "category", "matched": True, "name": best["name"],
-            "tag": None, "category": best["l1"], "path": best["path"],
-            "score": round(best_score, 3), "method": "fuzzy",
-        }
+    # Голый код/марка ("мс500", "а500с") без слова-товара НЕ матчим нечётко по каталогу —
+    # иначе "мс500" ловит "Промышленные сита из брони С500". Пусть лучше будет пусто.
+    marks_only = bool(m_ctokens) and all(any(ch.isdigit() for ch in t) for t in m_ctokens)
+    if not marks_only:
+        cand = set()
+        for t in m_ctokens:
+            cand |= prefix_index.get(t[:4], set())
+        candidates = [entries[i] for i in cand] if cand else entries
+        best, best_score = None, 0.0
+        for e in candidates:
+            s = _product_score(m_ctokens, m_norm, e["_ctokens"], e["norm"])
+            if (set(e["norm"].split()) & SPECIALIZED_MARKERS) - m_markers:
+                s *= 0.5
+            s *= _accessory_penalty(m_ctokens, e["norm"])
+            if s > best_score or (abs(s - best_score) < 1e-9 and best and e["level"] < best["level"]):
+                best, best_score = e, s
+        if best and best_score >= threshold:
+            return {
+                "kind": "category", "matched": True, "name": best["name"],
+                "tag": None, "category": best["l1"], "path": best["path"],
+                "score": round(best_score, 3), "method": "fuzzy",
+            }
 
     return _try(generic_aliases, "alias_generic")
 
