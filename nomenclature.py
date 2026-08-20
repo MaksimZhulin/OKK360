@@ -189,6 +189,21 @@ def _covered(a_tokens, b_tokens):
     return sum(1 for at in a_tokens if any(_tok_match(at, bt) for bt in b_tokens)) / len(a_tokens)
 
 
+def _accessory_penalty(m_ctokens, e_norm):
+    """Позиции вида 'X для/под Y' (шурупы ДЛЯ сэндвич-панелей, кляймеры ДЛЯ панелей) —
+    это аксессуар к товару Y. Если клиент назвал только Y (а сам товар X — 'шурупы' —
+    не упоминал), это НЕ то, что он хочет. Тогда сильно штрафуем.
+    Возвращает множитель: 1.0 (норм) или 0.3 (аксессуар к чужому товару)."""
+    parts = re.split(r"\s(?:для|под)\s", e_norm, maxsplit=1)
+    if len(parts) < 2:
+        return 1.0
+    left_tokens = content_tokens(parts[0])   # сам товар (шурупы/кляймеры/комплектующие)
+    if not left_tokens:
+        return 1.0
+    matched_left = any(_tok_match(lt, mt) for lt in left_tokens for mt in m_ctokens)
+    return 1.0 if matched_left else 0.3
+
+
 def _product_score(m_ctokens, m_norm, e_ctokens, e_norm):
     if not e_ctokens or not m_ctokens:
         return 0.0
@@ -219,6 +234,7 @@ def _match_tags(m_norm, m_ctokens, m_size, m_markers, threshold):
         e_all = set(e["norm"].split())
         if (e_all & SPECIALIZED_MARKERS) - m_markers:
             base *= 0.5
+        base *= _accessory_penalty(m_ctokens, e["norm"])
         # фактор размера
         tag_sizes = set(e.get("nums", []))
         if e.get("size"):
@@ -276,6 +292,7 @@ def _match_catalog(m_norm, m_ctokens, m_markers, threshold):
         s = _product_score(m_ctokens, m_norm, e["_ctokens"], e["norm"])
         if (set(e["norm"].split()) & SPECIALIZED_MARKERS) - m_markers:
             s *= 0.5
+        s *= _accessory_penalty(m_ctokens, e["norm"])
         if s > best_score or (abs(s - best_score) < 1e-9 and best and e["level"] < best["level"]):
             best, best_score = e, s
     if best and best_score >= threshold:
