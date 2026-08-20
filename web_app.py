@@ -1485,7 +1485,31 @@ elif st.session_state.current_step == 3:
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
                     range_to_write = f"'Выгрузка из проекта'!A{start_row}:Z{end_row}"
-                    
+
+                    # Гарантируем, что в листе достаточно строк (иначе update упадёт
+                    # с "exceeds grid limits"). При нехватке — докидываем строки с запасом.
+                    try:
+                        meta = service.spreadsheets().get(
+                            spreadsheetId=SPREADSHEET_ID,
+                            fields="sheets(properties(sheetId,title,gridProperties/rowCount))"
+                        ).execute()
+                        sheet_id, current_rows = None, 0
+                        for sh in meta.get('sheets', []):
+                            if sh['properties']['title'] == 'Выгрузка из проекта':
+                                sheet_id = sh['properties']['sheetId']
+                                current_rows = sh['properties']['gridProperties']['rowCount']
+                                break
+                        if sheet_id is not None and end_row > current_rows:
+                            service.spreadsheets().batchUpdate(
+                                spreadsheetId=SPREADSHEET_ID,
+                                body={"requests": [{"appendDimension": {
+                                    "sheetId": sheet_id, "dimension": "ROWS",
+                                    "length": end_row - current_rows + 500
+                                }}]}
+                            ).execute()
+                    except Exception as _grid_err:
+                        print(f"⚠️ Не удалось расширить сетку листа: {_grid_err}")
+
                     body = {'values': all_rows_data}
                     
                     result_update = service.spreadsheets().values().update(
