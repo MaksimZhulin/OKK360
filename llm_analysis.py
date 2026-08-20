@@ -9,11 +9,12 @@ from config import LLM_BASE_URL
 
 
 COST_CURRENCY = "₽"
+# Тариф в ₽ за 1000 токенов (вход/выход). tokengate даёт цену за 1М — делим на 1000.
 LLM_PRICES = {
-    "google/gemini-2.5-flash": {"in": 0.03, "out": 0.25},
-    "deepseek/deepseek-chat":  {"in": 0.05, "out": 0.20},
-    "openai/gpt-4o":           {"in": 0.55, "out": 2.20},
-    "mistralai/mistral-nemo":  {"in": 0.02, "out": 0.05},
+    "google/gemini-2.5-flash": {"in": 0.0324, "out": 0.27},   # РЕАЛЬНЫЙ тариф: 32.4 / 270 ₽ за 1М
+    "deepseek/deepseek-chat":  {"in": 0.05, "out": 0.20},     # примерно — уточни у tokengate
+    "openai/gpt-4o":           {"in": 0.55, "out": 2.20},     # примерно — уточни у tokengate
+    "mistralai/mistral-nemo":  {"in": 0.02, "out": 0.05},     # примерно — уточни у tokengate
 }
 LLM_PRICE_DEFAULT = {"in": 0.05, "out": 0.20}
 
