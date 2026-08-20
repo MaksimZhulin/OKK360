@@ -40,6 +40,10 @@ SPECIALIZED_MARKERS = {
     "оцинкованный", "оцинкованная",
 }
 
+# Общие слова-категории: если это ЕДИНСТВЕННОЕ слово-товар в упоминании ("труба 140",
+# "лист 3"), клиент не назвал тип — не матчим конкретный тег, идём в общую категорию.
+GENERIC_NOUNS = {"труба", "лист"}
+
 # Разговорные размеры -> число (мм).
 SIZE_WORDS = {
     "шестерка": "6", "восьмерка": "8", "десятка": "10", "двенашка": "12",
@@ -309,6 +313,22 @@ def _match_catalog(m_norm, m_ctokens, m_markers, threshold):
     return _try(generic_aliases, "alias_generic")
 
 
+def _match_generic_alias(m_norm):
+    """Прямой резолв общего слова-категории ('труба'->'Трубный металлопрокат',
+    'лист'->'Листовой прокат') через generic-синонимы. Для упоминаний без типа."""
+    _, generic_aliases, _ = _load_aliases()
+    m_tokens = set(tokenize(m_norm))
+    for alias_norm, entry in generic_aliases:
+        a_tokens = alias_norm.split()
+        if all(any(SequenceMatcher(None, at, mt).ratio() >= 0.85 for mt in m_tokens) for at in a_tokens):
+            return {
+                "kind": "category", "matched": True, "name": entry["name"],
+                "tag": None, "category": entry["l1"], "path": entry["path"],
+                "score": 0.6, "method": "alias_generic",
+            }
+    return None
+
+
 def match_one(mention, tag_threshold=0.5, cat_threshold=0.55):
     raw = (mention or "").strip()
     m_norm = _apply_slang(normalize(raw))
@@ -330,9 +350,14 @@ def match_one(mention, tag_threshold=0.5, cat_threshold=0.55):
     m_markers = set(tokenize(m_norm)) & SPECIALIZED_MARKERS
     m_size = result["size"]
 
-    hit = _match_tags(m_norm, m_ctokens, m_size, m_markers, tag_threshold)
-    if hit is None:
-        hit = _match_catalog(m_norm, m_ctokens, m_markers, cat_threshold)
+    # Голое "труба 140" / "лист 3" (тип не назван) — не ловим конкретный тег/позицию
+    # (иначе улетает в "Труба обсадная/бесшовная 140"). Идём СРАЗУ в общую категорию.
+    if m_ctokens and set(m_ctokens) <= GENERIC_NOUNS:
+        hit = _match_generic_alias(m_norm)
+    else:
+        hit = _match_tags(m_norm, m_ctokens, m_size, m_markers, tag_threshold)
+        if hit is None:
+            hit = _match_catalog(m_norm, m_ctokens, m_markers, cat_threshold)
     if hit:
         result.update(hit)
     return result
@@ -413,16 +438,25 @@ def _common_prefix_tokens(names):
     return common
 
 
+def _product_base_key(name):
+    """Ключ товара = название тега без размеров/марок ('Алюминиевая труба 40 мм' и
+    'Алюминиевая труба АД31Т1' -> оба 'алюминиевая труба'). По нему группируем."""
+    toks = normalize(name).split()
+    base = [t for t in toks
+            if not _is_size_tok(t) and not _is_grade_tok(t) and t not in {"мм", "см", "м"}]
+    return " ".join(base) if base else normalize(name)
+
+
 def format_nomenclature(items):
-    """Читаемый вывод. Позиции из одного упоминания группируются: общее название
-    товара — один раз, отличия (размер/сплав) через '; '. Разные товары — через ' | '.
+    """Читаемый вывод. Позиции ОДНОГО товара группируются (даже из разных упоминаний):
+    название товара — один раз, отличия (размер/сплав) через '; '. Разные товары — ' | '.
     Пример: 'Алюминиевая труба; 40 мм; АД31Т1 | Двутавр №20'. Иначе — 'Не определена'."""
-    # группируем по номеру упоминания, сохраняя порядок появления
+    # группируем по базе названия товара, сохраняя порядок появления
     order, groups = [], {}
     for it in items:
         if not it.get("matched") or not it.get("name"):
             continue
-        g = it.get("group", ("solo", it["name"]))
+        g = _product_base_key(it["name"])
         if g not in groups:
             groups[g] = []
             order.append(g)
