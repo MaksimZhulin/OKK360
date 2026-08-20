@@ -3,9 +3,14 @@
 Работа с LLM: коррекция терминов и ролей спикеров, учёт стоимости вызовов.
 Вынесено из web_app.py.
 """
+import json
 import streamlit as st
 
 from config import LLM_BASE_URL
+
+# Показывать сырой ответ LLM в консоли/логе (для проверки, отдаёт ли tokengate готовую
+# стоимость). Поставь False, когда наладишь и не нужно спамить лог.
+SHOW_RAW_LLM = True
 
 
 COST_CURRENCY = "₽"
@@ -18,16 +23,56 @@ LLM_PRICES = {
 }
 LLM_PRICE_DEFAULT = {"in": 0.05, "out": 0.20}
 
+def _extract_real_cost(response):
+    """Пытается достать ГОТОВУЮ стоимость из ответа прокси (если tokengate её отдаёт).
+    Проверяет несколько известных мест. Возвращает число или None."""
+    # 1) litellm кладёт сюда при проксировании
+    hp = getattr(response, "_hidden_params", None)
+    if isinstance(hp, dict) and hp.get("response_cost") is not None:
+        return float(hp["response_cost"])
+    # 2) нестандартные поля в теле ответа
+    for obj in (getattr(response, "model_extra", None), response):
+        for key in ("response_cost", "cost"):
+            val = None
+            if isinstance(obj, dict):
+                val = obj.get(key)
+            else:
+                val = getattr(obj, key, None)
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
 def add_llm_cost(model, response):
-    """Считает стоимость вызова по usage (реальные токены с платформы) и копит
-    её в session_state для текущего файла. Вызывать после каждого запроса к LLM."""
+    """Считает стоимость вызова и копит её в session_state для текущего файла.
+    Приоритет: готовая стоимость из ответа tokengate (если есть) -> иначе по токенам.
+    Вызывать после каждого запроса к LLM."""
     try:
-        usage = getattr(response, "usage", None)
-        if not usage:
-            return
-        p = LLM_PRICES.get(model, LLM_PRICE_DEFAULT)
-        cost = (usage.prompt_tokens / 1000.0) * p["in"] + \
-               (usage.completion_tokens / 1000.0) * p["out"]
+        # Диагностика: печатаем сырой ответ, чтобы видеть, что реально приходит
+        if SHOW_RAW_LLM:
+            try:
+                raw = response.model_dump()
+            except Exception:
+                raw = {"repr": str(response)}
+            # прячем текст ответа, чтобы не засорять лог — оставляем только служебное
+            raw.pop("choices", None)
+            print(f"💰 [LLM raw] {json.dumps(raw, ensure_ascii=False, default=str)[:1500]}")
+
+        real = _extract_real_cost(response)
+        if real is not None:
+            print(f"💰 [cost] готовая стоимость из ответа: {real}")
+            cost = real
+        else:
+            usage = getattr(response, "usage", None)
+            if not usage:
+                return
+            p = LLM_PRICES.get(model, LLM_PRICE_DEFAULT)
+            cost = (usage.prompt_tokens / 1000.0) * p["in"] + \
+                   (usage.completion_tokens / 1000.0) * p["out"]
+
         st.session_state["_file_llm_cost"] = st.session_state.get("_file_llm_cost", 0.0) + cost
     except Exception as e:
         print(f"⚠️ Учёт стоимости: {e}")
