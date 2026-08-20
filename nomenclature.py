@@ -320,6 +320,12 @@ def match_one(mention, tag_threshold=0.5, cat_threshold=0.55):
     if not m_norm:
         return result
 
+    # "сплав АМГ-5", "сплав АД31" — это марка материала товара (трубы/листа), а не
+    # отдельный товар. Не матчим (иначе улетает в "Сплав с рением" и подобное).
+    _mw = m_norm.split()
+    if _mw and _mw[0] == "сплав":
+        return result
+
     m_ctokens = content_tokens(m_norm)
     m_markers = set(tokenize(m_norm)) & SPECIALIZED_MARKERS
     m_size = result["size"]
