@@ -327,21 +327,19 @@ def match_mentions(mentions, tag_threshold=0.5, cat_threshold=0.55):
     return out
 
 
-def format_nomenclature(items, only_matched=False):
-    """'Арматура 8 мм (Арматурный прокат); Двутавр №20 (Сортовой прокат); клапан [?]'."""
-    parts = []
+def format_nomenclature(items):
+    """Читаемый вывод: если определён тег — сам тег; если только категория — категория;
+    если не определить ничего — 'Не определена'.
+    Пример: 'Заглушка желоба 200 мм; Стальная арматура'."""
+    names, seen = [], set()
     for it in items:
-        if not it["matched"]:
-            if only_matched:
-                continue
-            parts.append(f"{it['raw']} [?]")
+        if not it.get("matched"):
             continue
-        name = it["name"]
-        if it["kind"] == "category" and it.get("size"):
-            name = f"{name} {it['size']}"
-        cat = it.get("category")
-        parts.append(f"{name} ({cat})" if cat else name)
-    return "; ".join(parts)
+        name = it.get("name")
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return "; ".join(names) if names else "Не определена"
 
 
 def extract_mentions_llm(transcript_text, client, model, local_mode=False):
