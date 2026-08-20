@@ -798,7 +798,7 @@ with st.sidebar:
     transcription_method = st.radio(
         "🎤 Метод транскрибации",
         ["WhisperX + диаризация (локально)", "Yandex SpeechKit (API)"],
-        index=1,
+        index=0,
         key="transcription_method_select"
     )
     
