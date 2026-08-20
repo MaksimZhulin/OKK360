@@ -7,6 +7,9 @@ import re
 import subprocess
 from datetime import datetime
 
+# Распознавание номенклатуры из звонка по каталогу (data/catalog.json)
+from nomenclature import match_mentions, format_nomenclature
+
 # Windows: консоль по умолчанию cp1251 и падает на эмодзи в print() — принудительно UTF-8
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -981,6 +984,7 @@ elif st.session_state.current_step == 2:
 7. "client_mood": Настроение клиента (выбери одно: Нейтральное / Заинтересованное / Раздраженное / Довольное / Сомневающееся).
 8. "manager_actions": Ключевые действия менеджера (1-2 предложения).
 9. "recommendations": Краткое (1-2 предложения) ФАКТИЧЕСКОЕ наблюдение по сути разговора: что менеджер сделал хорошо и что конкретно упустил. БЕЗ слов "отлично/хорошо/плохо", без процентов и без общей оценки — только конкретика по содержанию. Итоговую оценку и зоны роста посчитает система отдельно.
+9a. "nomenclature_raw": Массив строк — ВСЕ товары/номенклатура металлопроката, которые упоминались в звонке (что интересует клиента или обсуждается в заказе). Пиши КАЖДУЮ позицию дословно как звучит, вместе с размером/маркой если названы. Пример: ["двутавр 20", "арматура 8 мм А500С", "лист 3мм оцинкованный"]. Не выдумывай то, чего нет в тексте. Если товары не обсуждались — верни пустой массив [].
 
 БИНАРНЫЕ КРИТЕРИИ (Оценивай строго: 1 = ДА, 0 = НЕТ):
 ⚠️ ПРАВИЛО ДЛЯ ПОВТОРНЫХ ЗВОНКОВ: Если "call_type" == "Повторный", ты ОБЯЗАН ставить 1 (оправдано) в критериях "establishing_contact", "client_type" и "clarifying_questions", так как этот этап уже пройден ранее.
@@ -1116,6 +1120,19 @@ elif st.session_state.current_step == 2:
                 # Рекомендация строится в коде (вердикт по % + слабые зоны), а не ИИ
                 analysis_result["recommendations"] = build_recommendation(analysis_result)
 
+                # Номенклатура: сырые упоминания от ИИ -> каноничные позиции каталога
+                try:
+                    _raw_noms = analysis_result.get("nomenclature_raw", []) or []
+                    if isinstance(_raw_noms, str):
+                        _raw_noms = [_raw_noms]
+                    _nom_items = match_mentions(_raw_noms)
+                    analysis_result["nomenclature"] = _nom_items
+                    analysis_result["nomenclature_str"] = format_nomenclature(_nom_items)
+                except Exception as _nom_err:
+                    print(f"⚠️ Матчинг номенклатуры: {_nom_err}")
+                    analysis_result["nomenclature"] = []
+                    analysis_result["nomenclature_str"] = ""
+
                 filename = uploaded_file.name
                 base_name = filename[:-4] if filename.lower().endswith(('.mp3', '.wav', '.m4a')) else filename
                 parts = base_name.split('-')
@@ -1239,6 +1256,8 @@ elif st.session_state.current_step == 3:
                 st.write(f"  👤 Оператор: {result['operator_name']}")
                 st.write(f"  📞 Тип звонка: {type_badge}")
                 st.write(f"  🎯 Тема: {result['analysis'].get('topic', '—')}")
+                _nom_str = result['analysis'].get('nomenclature_str', '')
+                st.write(f"  📦 Номенклатура: {_nom_str if _nom_str else '—'}")
                 st.write(f"  🏆 Общий балл: {grand_display}")
                 st.write(f"  ⭐ Базовый: {score_display}")
                 st.write(f"  🔎 Потребность: {need_display}")
@@ -1355,13 +1374,14 @@ elif st.session_state.current_step == 3:
                             nextstep_block,
                             speech_block,
                             grand_total,
-                            analysis.get("recommendations", "")
+                            analysis.get("recommendations", ""),
+                            analysis.get("nomenclature_str", "")
                         ]
                         all_rows_data.append(row_data)
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:Y{end_row}"
+                    range_to_write = f"'Выгрузка из проекта'!A{start_row}:Z{end_row}"
                     
                     body = {'values': all_rows_data}
                     
