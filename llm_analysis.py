@@ -73,7 +73,7 @@ def ollama_native_chat(messages, model, temperature=0.3, max_tokens=2048,
         "options": {"num_ctx": num_ctx, "temperature": temperature,
                     "num_predict": max_tokens},
     }
-    r = requests.post(OLLAMA_URL, json=body, timeout=timeout)
+    r = requests.post(OLLAMA_URL, json=body, timeout=timeout, proxies=NO_PROXY_LOCAL)
     r.raise_for_status()
     return (r.json().get("message", {}) or {}).get("content", "") or ""
 
@@ -82,11 +82,17 @@ OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 OLLAMA_VERSION_URL = "http://localhost:11434/api/version"
 
 
+# Все локальные вызовы к Ollama идут МИМО системного прокси. Иначе requests при
+# заданном HTTP(S)_PROXY гонит запрос к localhost через прокси -> тот до 127.0.0.1
+# не достучится (таймаут/отказ), и сервер ошибочно считается недоступным.
+NO_PROXY_LOCAL = {"http": None, "https": None}
+
+
 def _ollama_alive(timeout=2):
     """Отвечает ли локальный сервер Ollama."""
     import requests
     try:
-        return requests.get(OLLAMA_VERSION_URL, timeout=timeout).ok
+        return requests.get(OLLAMA_VERSION_URL, timeout=timeout, proxies=NO_PROXY_LOCAL).ok
     except Exception:
         return False
 
@@ -157,7 +163,8 @@ def unload_ollama_model(model):
     import requests
     try:
         requests.post(OLLAMA_GENERATE_URL,
-                      json={"model": model, "keep_alive": 0}, timeout=30)
+                      json={"model": model, "keep_alive": 0}, timeout=30,
+                      proxies=NO_PROXY_LOCAL)
         print(f"🔄 Ollama: запрошена выгрузка {model} из VRAM")
     except Exception as e:
         print(f"⚠️ Выгрузка Ollama ({model}): {e}")
