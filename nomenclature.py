@@ -42,7 +42,7 @@ SPECIALIZED_MARKERS = {
 
 # Общие слова-категории: если это ЕДИНСТВЕННОЕ слово-товар в упоминании ("труба 140",
 # "лист 3"), клиент не назвал тип — не матчим конкретный тег, идём в общую категорию.
-GENERIC_NOUNS = {"труба", "лист"}
+GENERIC_NOUNS = {"труба", "трубы", "лист", "листы"}
 
 # Разговорные размеры -> число (мм).
 SIZE_WORDS = {
@@ -318,6 +318,13 @@ def _match_catalog(m_norm, m_ctokens, m_markers, threshold):
             if "бу" in m_markers and "бу" not in _e_all:   # клиент просит БУ, а позиция новая
                 s *= 0.4
             s *= _accessory_penalty(m_ctokens, e["norm"])
+            # штраф за «лишние» характерные слова позиции, которых клиент не называл
+            # ('лист стальной' -> 'Лист асбостальной, кренгелит'): каждое длинное
+            # несовпавшее слово позиции делает совпадение менее вероятным.
+            _extra = [t for t in e["_ctokens"]
+                      if len(t) >= 6 and not any(_tok_match(t, mt) for mt in m_ctokens)]
+            if _extra:
+                s *= 0.65 ** len(_extra)
             if s > best_score or (abs(s - best_score) < 1e-9 and best and e["level"] < best["level"]):
                 best, best_score = e, s
         if best and best_score >= threshold:
@@ -416,29 +423,113 @@ def _split_size_grade(m_norm):
     return [f"{base_str} {size_core}"] + [f"{base_str} {g}" for g in grade_toks]
 
 
+def _split_multi(value):
+    """Поле size/grade от ИИ может содержать несколько значений: '70; 80; 75',
+    'Ст35, 40Х'. Разбиваем по ; , / и словам 'или'/'либо'. '50х20' остаётся целым."""
+    if not value:
+        return []
+    parts = re.split(r"[;,/]|\s+или\s+|\s+либо\s+", str(value))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _fmt_size_token(tok):
+    """Размерный токен -> для вывода. Чистое число/составной размер получают ' мм'
+    ('70'->'70 мм', '50х20'->'50х20 мм'); прочее (ДУ150, М12) остаётся как есть."""
+    core = tok.strip().lower().replace(",", ".").replace("х", "x").replace("*", "x")
+    if re.fullmatch(r"\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)*", core):
+        return f"{tok.strip()} мм"
+    return tok.strip()
+
+
+def _strip_variant_from_name(name):
+    """Убирает из канонического имени размер/марку/единицы, оставляя базовый товар
+    с исходным регистром: 'Круг стальной 70 мм' -> 'Круг стальной',
+    'Труба ... профильная 40х20х2 мм' -> 'Труба ... профильная'."""
+    keep = []
+    for t in name.split():
+        nt = normalize(t)
+        if not nt or nt in {"мм", "см", "м"} or _is_size_tok(nt) or _is_grade_tok(nt):
+            continue
+        keep.append(t)
+    return " ".join(keep) if keep else name
+
+
+def _match_product_base(item, threshold=0.62):
+    """Определяет БАЗОВЫЙ товар по item (без размера/марки). Приоритет — категория
+    каталога (чистое имя 'Двутавровая балка', 'Обсадная труба'), затем тег как
+    fallback. Порог выше обычного — чтобы слабые совпадения уходили в 'Не определена',
+    а не в мусорный тег ('листы'->'Рений лист')."""
+    m_norm = _apply_slang(normalize((item or "").strip()))
+    if not m_norm:
+        return None
+    mw = m_norm.split()
+    if mw and mw[0] == "сплав":
+        return None
+    m_ctokens = content_tokens(m_norm)
+    m_markers = set(tokenize(m_norm)) & SPECIALIZED_MARKERS
+    # голое слово-категория ('труба'/'лист') — сразу в общую категорию
+    if m_ctokens and set(m_ctokens) <= GENERIC_NOUNS and "бу" not in m_markers:
+        return _match_generic_alias(m_norm)
+    hit = _match_catalog(m_norm, m_ctokens, m_markers, threshold)
+    if hit is None:
+        hit = _match_tags(m_norm, m_ctokens, None, m_markers, threshold)
+    return hit
+
+
+def match_structured(item, size, grade, group):
+    """Структурный матчинг (ИИ уже отделил размер и марку).
+    1) Определяем ТОЛЬКО базовый товар по item (без размера/марки — цифры из марок
+       не мешают). 2) К каноничному имени сами дописываем названные клиентом
+       размер(ы) и марку(ы). 3) Нет уверенного товара -> одна unmatched-позиция
+       (в выводе станет 'Не определена'). Каждая позиция помечается group."""
+    item = (item or "").strip()
+    base = _match_product_base(item) if item else None
+    if not base or not base.get("matched"):
+        return [{"raw": item, "matched": False, "kind": None, "name": None,
+                 "tag": None, "category": None, "path": None, "size": None,
+                 "score": 0.0, "method": None, "group": group}]
+
+    B = _strip_variant_from_name(base["name"])
+    tails = [_fmt_size_token(s) for s in _split_multi(size)] + _split_multi(grade)
+    names = [f"{B} {t}".strip() for t in tails] if tails else [B]
+    # base_key задаём явно (мы знаем базу) — надёжнее, чем выводить её из имени
+    # (иначе марки без цифр, напр. АМЦМ, дробят одну позицию на разные блоки).
+    bkey = normalize(B)
+    return [{"raw": item, "matched": True, "kind": base.get("kind"), "name": nm,
+             "tag": base.get("tag"), "category": base.get("category"),
+             "path": base.get("path"), "size": None, "score": base.get("score", 0.0),
+             "method": base.get("method"), "group": group, "base_key": bkey} for nm in names]
+
+
 def match_mentions(mentions, tag_threshold=0.5, cat_threshold=0.55):
     if not mentions:
         return []
-    if isinstance(mentions, str):
+    if isinstance(mentions, (str, dict)):
         mentions = [mentions]
     out, seen = [], set()
     for gi, m in enumerate(mentions):
-        raw = (m or "").strip()
-        m_norm = _apply_slang(normalize(raw))
-        queries = _split_size_grade(m_norm)
-        if queries:
-            results = [match_one(q, tag_threshold, cat_threshold) for q in queries]
-            results = [r for r in results if r["matched"]]
-            if not results:  # ничего не разошлось — обычный матчинг всей строки
-                results = [match_one(raw, tag_threshold, cat_threshold)]
+        if isinstance(m, dict):
+            # структурный вход {item, size, grade, ...} — ИИ уже разделил размер/марку
+            results = match_structured(m.get("item", ""), m.get("size", ""),
+                                       m.get("grade", ""), gi)
         else:
-            results = [match_one(raw, tag_threshold, cat_threshold)]
+            raw = (m or "").strip()
+            m_norm = _apply_slang(normalize(raw))
+            queries = _split_size_grade(m_norm)
+            if queries:
+                results = [match_one(q, tag_threshold, cat_threshold) for q in queries]
+                results = [r for r in results if r["matched"]]
+                if not results:  # ничего не разошлось — обычный матчинг всей строки
+                    results = [match_one(raw, tag_threshold, cat_threshold)]
+            else:
+                results = [match_one(raw, tag_threshold, cat_threshold)]
+            for r in results:
+                r["group"] = gi   # позиции из одного упоминания — одна группа
         for r in results:
-            key = (r["kind"], r["name"]) if r["matched"] else ("raw", normalize(r["raw"]))
-            if not r["raw"] or key in seen:
+            key = (r["kind"], r["name"]) if r["matched"] else ("raw", normalize(r.get("raw") or ""))
+            if (not r.get("raw") and not r.get("name")) or key in seen:
                 continue
             seen.add(key)
-            r["group"] = gi   # позиции из одного упоминания — одна группа
             out.append(r)
     return out
 
@@ -528,7 +619,8 @@ def _group_items(items):
     for it in items:
         if not it.get("matched") or not it.get("name"):
             continue
-        g = _product_base_key(it["name"])
+        # base_key от структурного матчинга надёжнее, иначе выводим из имени
+        g = it.get("base_key") or _product_base_key(it["name"])
         if g not in groups:
             groups[g] = []
             order.append(g)
