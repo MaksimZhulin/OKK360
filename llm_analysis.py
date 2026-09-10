@@ -50,28 +50,35 @@ def add_llm_cost(model, response):
     Приоритет: готовая стоимость из ответа tokengate (если есть) -> иначе по токенам.
     Вызывать после каждого запроса к LLM."""
     try:
-        # Диагностика: печатаем только служебные поля ответа (без тяжёлой сериализации
-        # всего тела). Цель — увидеть, есть ли готовая стоимость от tokengate.
-        if SHOW_RAW_LLM:
-            usage = getattr(response, "usage", None)
-            hp = getattr(response, "_hidden_params", None)
-            extra = getattr(response, "model_extra", None)
-            print(f"💰 [LLM] usage={usage} | hidden_params={hp} | extra_keys="
-                  f"{list(extra.keys()) if isinstance(extra, dict) else extra}")
+        usage = getattr(response, "usage", None)
+        # Кэшированные входные токены (если провайдер отдаёт) — из-за них реальная
+        # стоимость заметно ниже оценки по токенам: кэш-префикс биллится ~в 4 раза дешевле.
+        cached = 0
+        det = getattr(usage, "prompt_tokens_details", None) if usage else None
+        if det is not None:
+            cached = getattr(det, "cached_tokens", None) or (
+                det.get("cached_tokens") if isinstance(det, dict) else 0) or 0
 
         real = _extract_real_cost(response)
         if real is not None:
-            print(f"💰 [cost] готовая стоимость из ответа: {real}")
-            cost = real
-        else:
-            usage = getattr(response, "usage", None)
-            if not usage:
-                return
+            cost, source = real, "tokengate (реальная)"
+        elif usage:
             p = LLM_PRICES.get(model, LLM_PRICE_DEFAULT)
             cost = (usage.prompt_tokens / 1000.0) * p["in"] + \
                    (usage.completion_tokens / 1000.0) * p["out"]
+            source = "оценка по токенам (кэш не учтён)"
+        else:
+            return
 
-        st.session_state["_file_llm_cost"] = st.session_state.get("_file_llm_cost", 0.0) + cost
+        prev = st.session_state.get("_file_llm_cost", 0.0)
+        st.session_state["_file_llm_cost"] = prev + cost
+
+        # Диагностика: по одной читаемой строке на вызов — видно источник цены,
+        # токены (в т.ч. кэш) и накопленную сумму по файлу. SHOW_RAW_LLM=False отключает.
+        if SHOW_RAW_LLM and usage:
+            print(f"💰 [{model}] вход={usage.prompt_tokens} (кэш {cached}) "
+                  f"выход={usage.completion_tokens} | цена={cost:.4f} ₽ "
+                  f"[{source}] | по файлу: {prev + cost:.4f} ₽")
     except Exception as e:
         print(f"⚠️ Учёт стоимости: {e}")
 
