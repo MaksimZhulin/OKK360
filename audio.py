@@ -239,6 +239,34 @@ def load_align_model(language_code, device):
     model_a, metadata = whisperx.load_align_model(language_code=language_code, device=device)
     return model_a, metadata
 
+
+def free_gpu_memory():
+    """Сбрасывает кэши CUDA и запускает сборку мусора. Вызываем после выгрузки
+    крупной модели, иначе VRAM освобождается не сразу (Windows/CUDA)."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception as e:
+        print(f"⚠️ Очистка VRAM: {e}")
+
+
+def unload_whisperx_from_vram():
+    """Выгружает модели WhisperX (основную + выравнивание) из VRAM.
+    Модели держатся в @st.cache_resource и живут в видеопамяти между файлами —
+    .clear() убирает ссылки, дальше free_gpu_memory() реально освобождает VRAM.
+    Нужно перед запуском локальной Qwen: на 12 ГБ обе модели одновременно не влезают."""
+    try:
+        load_whisperx_model.clear()
+        load_align_model.clear()
+        print("🔄 WhisperX выгружен из кэша")
+    except Exception as e:
+        print(f"⚠️ Выгрузка WhisperX: {e}")
+    free_gpu_memory()
+
 def build_turns_from_words(result):
     """Собирает реплики из ПОСЛОВНОЙ разметки спикеров (точные границы смены спикера).
     Это убирает слипание фраз, когда один сегмент Whisper охватывает двух людей.

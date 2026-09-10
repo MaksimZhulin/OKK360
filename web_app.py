@@ -22,10 +22,11 @@ from config import SPREADSHEET_ID, CREDENTIALS_FILE, SHEET_NAME, SHEET_TITLE, LL
 from audio import (
     WHISPERX_AVAILABLE, preprocess_audio, pad_audio_simple_silence,
     transcribe_with_yandex, transcribe_with_whisperx_diarization,
+    unload_whisperx_from_vram,
 )
 from llm_analysis import (
     COST_CURRENCY, add_llm_cost, smart_text_correction, correct_speaker_roles,
-    strip_think, ollama_native_chat,
+    strip_think, ollama_native_chat, unload_ollama_model,
 )
 
 # Критерии оценки и подсчёт баллов вынесены в scoring.py
@@ -175,11 +176,21 @@ elif st.session_state.current_step == 2:
             client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
             st.write(f"☁️ Используем облачную модель: {analysis_model}")
 
+        transcription_method = st.session_state.get("transcription_method_select", "WhisperX + диаризация (локально)")
+
+        # На 12 ГБ VRAM WhisperX large-v3 и Qwen-14B одновременно не помещаются, поэтому
+        # обрабатываем в две фазы: сначала транскрибируем ВСЕ файлы (GPU занят только
+        # WhisperX), затем выгружаем его и анализируем ВСЕ транскрипты (GPU занят только Qwen).
+        if local_mode:
+            unload_ollama_model(analysis_model)  # вдруг Qwen висит с прошлого прогона — освобождаем VRAM
+
         batch_start = time.time()
+        transcribed = []  # сырые транскрипты переносим из Фазы 1 в Фазу 2
+
+        # ============ ФАЗА 1: ТРАНСКРИБАЦИЯ (GPU = только WhisperX) ============
         for i, uploaded_file in enumerate(st.session_state.uploaded_files):
             file_start = time.time()
-            elapsed_so_far = time.time() - batch_start
-            status_text.text(f"⏱️ Обработка {i+1}/{total_files}: {uploaded_file.name} · прошло {elapsed_so_far:.0f} сек")
+            status_text.text(f"🎤 Транскрибация {i+1}/{total_files}: {uploaded_file.name}")
             
             # --- ВАЖНО: Запоминаем пути, чтобы удалить их в конце ---
             original_temp_path = None
@@ -227,37 +238,65 @@ elif st.session_state.current_step == 2:
 
                     if "❌" in transcript_text:
                         raise Exception(transcript_text)
-                    
-                    st.write("🔍 Коррекция текста...")
-                    transcript_text = smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode)
-                    st.write(f"✅ Коррекция завершена! Символов: {len(transcript_text)}")
-                    
-                    st.write("🔍 Коррекция ролей спикеров...")
-                    transcript_text = correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode)
-                    st.write(f"✅ Коррекция ролей завершена!")
-
                 else:
                     if not all([yandex_api_key, aws_access_key_id, aws_secret_access_key, yandex_bucket]):
                         raise Exception("Заполните все ключи Яндекса в боковой панели!")
-                    
+
                     st.write("⚡ Используем Yandex SpeechKit")
                     transcript_text = transcribe_with_yandex(
-                        temp_filename, 
-                        yandex_api_key, 
-                        aws_access_key_id, 
-                        aws_secret_access_key, 
+                        temp_filename,
+                        yandex_api_key,
+                        aws_access_key_id,
+                        aws_secret_access_key,
                         yandex_bucket
                     )
-                
+
                     if "❌" in transcript_text:
                         raise Exception(transcript_text)
-                
-                    st.write("🔍 Коррекция терминов (Сальметро -> СтальМетУрал)...")
-                    transcript_text = smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode)
-                    
-                    st.write("🔍 Коррекция ролей спикеров (LLM)...")
-                    transcript_text = correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode)
-                    st.write(f"✅ Коррекция завершена! Символов: {len(transcript_text)}")
+
+                transcribed.append({
+                    'uploaded_file': uploaded_file,
+                    'transcript': transcript_text,
+                    't_phase1': time.time() - file_start,
+                })
+            except Exception as e:
+                st.session_state.processing_results.append({'filename': uploaded_file.name, 'status': 'error', 'error': str(e)})
+            finally:
+                # Временные аудио больше не нужны — Фаза 2 работает только с текстом
+                try:
+                    if original_temp_path and os.path.exists(original_temp_path):
+                        os.remove(original_temp_path)
+                    if padded_temp_path and os.path.exists(padded_temp_path):
+                        os.remove(padded_temp_path)
+                    if cleaned_temp_path and os.path.exists(cleaned_temp_path):
+                        os.remove(cleaned_temp_path)
+                except Exception as cleanup_err:
+                    print(f"⚠️ Не удалось удалить временный файл: {cleanup_err}")
+
+            progress_bar.progress(0.5 * (i + 1) / total_files)
+
+        # === СМЕНА МОДЕЛИ НА GPU: выгружаем WhisperX, освобождаем VRAM под Qwen ===
+        status_text.text("🔄 Освобождаем видеопамять (выгрузка WhisperX)...")
+        unload_whisperx_from_vram()
+
+        # ============ ФАЗА 2: КОРРЕКЦИЯ + АНАЛИЗ (GPU = только Qwen / облако) ============
+        total_transcribed = len(transcribed)
+        for j, item in enumerate(transcribed):
+            uploaded_file = item['uploaded_file']
+            transcript_text = item['transcript']
+            file_start = time.time()
+            status_text.text(f"🧠 Анализ {j+1}/{total_transcribed}: {uploaded_file.name}")
+
+            try:
+                st.session_state["_file_llm_cost"] = 0.0  # копим стоимость LLM за файл
+
+                st.write("🔍 Коррекция текста...")
+                transcript_text = smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode)
+                st.write(f"✅ Коррекция завершена! Символов: {len(transcript_text)}")
+
+                st.write("🔍 Коррекция ролей спикеров...")
+                transcript_text = correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode)
+                st.write("✅ Коррекция ролей завершена!")
 
                 similar_calls = find_similar_calls(transcript_text, top_k=3)
                 
@@ -486,27 +525,17 @@ elif st.session_state.current_step == 2:
                 })
             except Exception as e:
                 st.session_state.processing_results.append({'filename': uploaded_file.name, 'status': 'error', 'error': str(e)})
-            finally:
-                # === ОЧИСТКА МУСОРА ПОСЛЕ ОБРАБОТКИ ===
-                # Удаляем и оригинал, и файл с тишиной, чтобы они не копились
-                try:
-                    if original_temp_path and os.path.exists(original_temp_path):
-                        os.remove(original_temp_path)
-                    if padded_temp_path and os.path.exists(padded_temp_path):
-                        os.remove(padded_temp_path)
-                    if cleaned_temp_path and os.path.exists(cleaned_temp_path):
-                        os.remove(cleaned_temp_path)
-                except Exception as cleanup_err:
-                    print(f"⚠️ Не удалось удалить временный файл: {cleanup_err}")
 
-            file_elapsed = time.time() - file_start
+            # Полное время файла = транскрибация (Фаза 1) + анализ (Фаза 2)
+            file_elapsed = item['t_phase1'] + (time.time() - file_start)
             if st.session_state.processing_results:
                 st.session_state.processing_results[-1]['elapsed'] = file_elapsed
             total_elapsed = time.time() - batch_start
-            status_text.text(f"✅ {i+1}/{total_files} · {file_elapsed:.0f} сек на файл · всего {total_elapsed:.0f} сек")
-            progress_bar.progress((i + 1) / total_files)
+            status_text.text(f"✅ {j+1}/{total_transcribed} · {file_elapsed:.0f} сек на файл · всего {total_elapsed:.0f} сек")
+            progress_bar.progress(0.5 + 0.5 * (j + 1) / total_transcribed)
             time.sleep(1)
 
+        progress_bar.progress(1.0)
         st.session_state.total_elapsed = time.time() - batch_start
         st.session_state.current_step = 3
         st.rerun()

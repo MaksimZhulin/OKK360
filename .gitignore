@@ -482,6 +482,7 @@ secrets.json
 # Логи
 *.log
 logs/
+_ollog.txt
 
 # Временные файлы приложения
 temp/

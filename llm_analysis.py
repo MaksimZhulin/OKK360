@@ -78,6 +78,22 @@ def ollama_native_chat(messages, model, temperature=0.3, max_tokens=2048,
     return (r.json().get("message", {}) or {}).get("content", "") or ""
 
 
+OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
+
+
+def unload_ollama_model(model):
+    """Просит Ollama немедленно выгрузить модель из VRAM (keep_alive=0).
+    Нужно перед Фазой транскрибации: если Qwen висит с прошлого прогона (keep_alive 15m),
+    WhisperX не влезет в 12 ГБ. Ошибки глушим — если Ollama не запущена/модели нет, не страшно."""
+    import requests
+    try:
+        requests.post(OLLAMA_GENERATE_URL,
+                      json={"model": model, "keep_alive": 0}, timeout=30)
+        print(f"🔄 Ollama: запрошена выгрузка {model} из VRAM")
+    except Exception as e:
+        print(f"⚠️ Выгрузка Ollama ({model}): {e}")
+
+
 COST_CURRENCY = "₽"
 # Тариф в ₽ за 1000 токенов (вход/выход). tokengate даёт цену за 1М — делим на 1000.
 LLM_PRICES = {
