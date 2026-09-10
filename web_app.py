@@ -25,6 +25,7 @@ from audio import (
 )
 from llm_analysis import (
     COST_CURRENCY, add_llm_cost, smart_text_correction, correct_speaker_roles,
+    strip_think, nothink_suffix, ollama_options,
 )
 
 # Критерии оценки и подсчёт баллов вынесены в scoring.py
@@ -52,12 +53,19 @@ st.markdown("---")
 with st.sidebar:
     st.header("⚙️ Настройки")
     
-    local_mode = st.checkbox("🖥️ Локальная модель (Ollama Mistral NeMo)", value=False, key="local_mode_checkbox")
-    
+    local_mode = st.checkbox("🖥️ Локальная модель (Ollama)", value=False, key="local_mode_checkbox")
+
     if local_mode:
-        analysis_model = "mistral-nemo"
-        deepseek_key = ""  
-        st.info("🏠 Локальная обработка через Ollama (не требует API ключа)")
+        analysis_model = st.selectbox(
+            "🧠 Локальная модель (Ollama)",
+            ["qwen3:14b", "mistral-nemo"],
+            index=0,
+            key="local_model_select",
+            help="Запускается локально на вашей GPU через Ollama (API-ключ не нужен). "
+                 "Модель должна быть скачана: `ollama pull qwen3:14b`."
+        )
+        deepseek_key = ""
+        st.info(f"🏠 Локальная обработка через Ollama: {analysis_model} (API-ключ не нужен)")
     else:
         analysis_model = st.selectbox(
             "🧠 Модель анализа",
@@ -162,7 +170,7 @@ elif st.session_state.current_step == 2:
         
         if local_mode:
             client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
-            st.write("🏠 Используем локальную модель: mistral-nemo")
+            st.write(f"🏠 Используем локальную модель: {analysis_model}")
         else:
             client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
             st.write(f"☁️ Используем облачную модель: {analysis_model}")
@@ -356,13 +364,13 @@ elif st.session_state.current_step == 2:
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
                 response = client.chat.completions.create(model=analysis_model, messages=[
-                    {"role": "system", "content": "Ты — опытный аналитик колл-центра, специализирующийся на глубоком анализе транскрипций звонков. Твоя цель — предоставить всестороннюю, объективную и профессиональную оценку взаимодействия между клиентом и агентом, выявить ключевые паттерны, проблемы и предложить конкретные, действенные рекомендации. Отвечай строго в формате JSON."},
+                    {"role": "system", "content": "Ты — опытный аналитик колл-центра, специализирующийся на глубоком анализе транскрипций звонков. Твоя цель — предоставить всестороннюю, объективную и профессиональную оценку взаимодействия между клиентом и агентом, выявить ключевые паттерны, проблемы и предложить конкретные, действенные рекомендации. Отвечай строго в формате JSON." + nothink_suffix(analysis_model)},
                     {"role": "user", "content": prompt}
-                ], temperature=0.3, max_tokens=2500)
+                ], temperature=0.3, max_tokens=2500, **ollama_options(local_mode))
 
                 if not local_mode:
                     add_llm_cost(analysis_model, response)
-                result_text = response.choices[0].message.content.strip()
+                result_text = strip_think(response.choices[0].message.content)
                 json_start = result_text.find('{')
                 json_end = result_text.rfind('}')
                 

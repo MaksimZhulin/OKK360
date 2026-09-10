@@ -3,6 +3,7 @@
 Работа с LLM: коррекция терминов и ролей спикеров, учёт стоимости вызовов.
 Вынесено из web_app.py.
 """
+import re
 import streamlit as st
 
 from config import LLM_BASE_URL
@@ -10,6 +11,36 @@ from config import LLM_BASE_URL
 # Показывать сырой ответ LLM в консоли/логе (для проверки, отдаёт ли tokengate готовую
 # стоимость). Поставь False, когда наладишь и не нужно спамить лог.
 SHOW_RAW_LLM = True
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def strip_think(text):
+    """Убирает блок рассуждений <think>...</think> у reasoning-моделей (Qwen3 и пр.),
+    чтобы он не попадал в транскрипт/JSON. Для обычных моделей текст не меняется."""
+    if not text:
+        return text
+    return _THINK_RE.sub("", text).strip()
+
+
+def nothink_suffix(model):
+    """Для Qwen3 мягко отключаем режим размышлений через маркер /no_think (быстрее,
+    чище JSON). Для остальных моделей (gemini и т.д.) — пустая строка, ничего не меняем."""
+    return " /no_think" if model and "qwen" in str(model).lower() else ""
+
+
+# Контекст для локальных моделей Ollama. Дефолт Ollama ~4096 токенов обрезал бы наш
+# большой промпт (критерии + транскрипт до 10к симв. + примеры ≈ 8-9к токенов) —
+# расширяем, иначе анализ идёт по обрезанному тексту. Для облака параметр не шлём.
+LOCAL_NUM_CTX = 12288
+
+
+def ollama_options(local_mode):
+    """kwargs для create(): локальным моделям задаём num_ctx (расширенный контекст).
+    Облаку — пусто, вызов остаётся байт-в-байт прежним (gemini не трогаем)."""
+    if not local_mode:
+        return {}
+    return {"extra_body": {"options": {"num_ctx": LOCAL_NUM_CTX}}}
 
 
 COST_CURRENCY = "₽"
@@ -127,16 +158,17 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
         response = client.chat.completions.create(
             model=analysis_model,
             messages=[
-                {"role": "system", "content": "Ты бездушный алгоритм автозамены. Ты никогда не удаляешь оригинальные слова и не меняешь грамматику. Исправляй только ошибки, где слова сильно зажеванны и не представляются доступными для прочтения, сохраняй структуру."},
+                {"role": "system", "content": "Ты бездушный алгоритм автозамены. Ты никогда не удаляешь оригинальные слова и не меняешь грамматику. Исправляй только ошибки, где слова сильно зажеванны и не представляются доступными для прочтения, сохраняй структуру." + nothink_suffix(analysis_model)},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=4000
+            max_tokens=4000,
+            **ollama_options(local_mode)
         )
-        
+
         if not local_mode:
             add_llm_cost(analysis_model, response)
-        corrected_text = response.choices[0].message.content.strip()
+        corrected_text = strip_think(response.choices[0].message.content)
 
         if "Менеджер:" in corrected_text or "Клиент:" in corrected_text:
             return corrected_text
@@ -187,16 +219,17 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
         response = client.chat.completions.create(
             model=analysis_model,
             messages=[
-                {"role": "system", "content": "Ты логический редактор. Твоя задача — распутать диалог, переставив теги ролей там, где это необходимо по смыслу. Ты не меняешь слова, но можешь разбивать склеенные абзацы."},
+                {"role": "system", "content": "Ты логический редактор. Твоя задача — распутать диалог, переставив теги ролей там, где это необходимо по смыслу. Ты не меняешь слова, но можешь разбивать склеенные абзацы." + nothink_suffix(analysis_model)},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=4000
+            max_tokens=4000,
+            **ollama_options(local_mode)
         )
-        
+
         if not local_mode:
             add_llm_cost(analysis_model, response)
-        corrected_text = response.choices[0].message.content.strip()
+        corrected_text = strip_think(response.choices[0].message.content)
 
         if "👨‍💼 Менеджер:" in corrected_text and "👤 Клиент:" in corrected_text:
             return corrected_text
