@@ -25,7 +25,7 @@ from audio import (
 )
 from llm_analysis import (
     COST_CURRENCY, add_llm_cost, smart_text_correction, correct_speaker_roles,
-    strip_think, nothink_suffix, ollama_options,
+    strip_think, nothink_suffix, ollama_options, make_ollama_client,
 )
 
 # Критерии оценки и подсчёт баллов вынесены в scoring.py
@@ -169,8 +169,20 @@ elif st.session_state.current_step == 2:
         from openai import OpenAI
         
         if local_mode:
-            client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+            client = make_ollama_client()
             st.write(f"🏠 Используем локальную модель: {analysis_model}")
+            # Прогрев: грузим модель в память ОДИН раз до цикла (холодная загрузка 14B
+            # долгая). Иначе первый реальный вызов ловит 503. Блокируется до готовности.
+            with st.spinner(f"Загружаю {analysis_model} в память (первый раз — до минуты)…"):
+                try:
+                    client.chat.completions.create(
+                        model=analysis_model,
+                        messages=[{"role": "user", "content": "ok" + nothink_suffix(analysis_model)}],
+                        max_tokens=5, **ollama_options(local_mode)
+                    )
+                    st.write("✅ Модель загружена в память")
+                except Exception as _warm_e:
+                    st.warning(f"⚠️ Не удалось прогреть модель (продолжаю): {_warm_e}")
         else:
             client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
             st.write(f"☁️ Используем облачную модель: {analysis_model}")

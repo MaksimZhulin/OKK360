@@ -43,6 +43,15 @@ def ollama_options(local_mode):
     return {"extra_body": {"options": {"num_ctx": LOCAL_NUM_CTX}}}
 
 
+def make_ollama_client():
+    """Клиент к локальной Ollama. Большой timeout + много ретраев: холодная загрузка
+    крупной модели (14B) в память длится дольше дефолтных ретраев OpenAI-клиента,
+    из-за чего первый вызов ловил 503. С запасом ретраев холодный старт переживается."""
+    from openai import OpenAI
+    return OpenAI(api_key="ollama", base_url="http://localhost:11434/v1",
+                  timeout=600, max_retries=8)
+
+
 COST_CURRENCY = "₽"
 # Тариф в ₽ за 1000 токенов (вход/выход). tokengate даёт цену за 1М — делим на 1000.
 LLM_PRICES = {
@@ -118,7 +127,7 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
     from openai import OpenAI
     
     if local_mode:
-        client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+        client = make_ollama_client()
     else:
         client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
     
@@ -184,7 +193,7 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
     from openai import OpenAI
     
     if local_mode:
-        client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1")
+        client = make_ollama_client()
     else:
         client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
     
