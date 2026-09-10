@@ -25,7 +25,7 @@ from audio import (
 )
 from llm_analysis import (
     COST_CURRENCY, add_llm_cost, smart_text_correction, correct_speaker_roles,
-    strip_think, nothink_suffix, ollama_options, make_ollama_client,
+    strip_think, ollama_native_chat,
 )
 
 # Критерии оценки и подсчёт баллов вынесены в scoring.py
@@ -169,20 +169,8 @@ elif st.session_state.current_step == 2:
         from openai import OpenAI
         
         if local_mode:
-            client = make_ollama_client()
-            st.write(f"🏠 Используем локальную модель: {analysis_model}")
-            # Прогрев: грузим модель в память ОДИН раз до цикла (холодная загрузка 14B
-            # долгая). Иначе первый реальный вызов ловит 503. Блокируется до готовности.
-            with st.spinner(f"Загружаю {analysis_model} в память (первый раз — до минуты)…"):
-                try:
-                    client.chat.completions.create(
-                        model=analysis_model,
-                        messages=[{"role": "user", "content": "ok" + nothink_suffix(analysis_model)}],
-                        max_tokens=5, **ollama_options(local_mode)
-                    )
-                    st.write("✅ Модель загружена в память")
-                except Exception as _warm_e:
-                    st.warning(f"⚠️ Не удалось прогреть модель (продолжаю): {_warm_e}")
+            client = None  # локально ходим через нативный /api/chat Ollama (ollama_native_chat)
+            st.write(f"🏠 Используем локальную модель: {analysis_model} (первый вызов грузит её в память)")
         else:
             client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
             st.write(f"☁️ Используем облачную модель: {analysis_model}")
@@ -375,14 +363,19 @@ elif st.session_state.current_step == 2:
 
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
-                response = client.chat.completions.create(model=analysis_model, messages=[
-                    {"role": "system", "content": "Ты — опытный аналитик колл-центра, специализирующийся на глубоком анализе транскрипций звонков. Твоя цель — предоставить всестороннюю, объективную и профессиональную оценку взаимодействия между клиентом и агентом, выявить ключевые паттерны, проблемы и предложить конкретные, действенные рекомендации. Отвечай строго в формате JSON." + nothink_suffix(analysis_model)},
+                _an_messages = [
+                    {"role": "system", "content": "Ты — опытный аналитик колл-центра, специализирующийся на глубоком анализе транскрипций звонков. Твоя цель — предоставить всестороннюю, объективную и профессиональную оценку взаимодействия между клиентом и агентом, выявить ключевые паттерны, проблемы и предложить конкретные, действенные рекомендации. Отвечай строго в формате JSON."},
                     {"role": "user", "content": prompt}
-                ], temperature=0.3, max_tokens=2500, **ollama_options(local_mode))
-
-                if not local_mode:
+                ]
+                if local_mode:
+                    # локально: нативный /api/chat с think=False (иначе пустой JSON)
+                    result_text = strip_think(ollama_native_chat(_an_messages, analysis_model,
+                                                                 temperature=0.3, max_tokens=2500))
+                else:
+                    response = client.chat.completions.create(
+                        model=analysis_model, messages=_an_messages, temperature=0.3, max_tokens=2500)
                     add_llm_cost(analysis_model, response)
-                result_text = strip_think(response.choices[0].message.content)
+                    result_text = strip_think(response.choices[0].message.content)
                 json_start = result_text.find('{')
                 json_end = result_text.rfind('}')
                 

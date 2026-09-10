@@ -52,6 +52,32 @@ def make_ollama_client():
                   timeout=600, max_retries=8)
 
 
+OLLAMA_URL = "http://localhost:11434/api/chat"
+
+
+def ollama_native_chat(messages, model, temperature=0.3, max_tokens=2048,
+                       num_ctx=LOCAL_NUM_CTX, timeout=1800):
+    """Вызов локальной модели через НАТИВНЫЙ /api/chat Ollama (а не OpenAI /v1).
+    Почему нативный: (1) он блокирующе ждёт загрузку модели (нет гонки 503 на
+    холодном старте, как в /v1); (2) поддерживает think=False — единственный
+    надёжный способ выключить «размышления» Qwen3 (маркер /no_think в тексте на
+    Ollama 0.34 не работает, из-за чего content приходил пустым, а JSON не парсился).
+    Возвращает строку content."""
+    import requests
+    body = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": False,   # выключаем reasoning — иначе пустой/битый content
+        "keep_alive": "15m",
+        "options": {"num_ctx": num_ctx, "temperature": temperature,
+                    "num_predict": max_tokens},
+    }
+    r = requests.post(OLLAMA_URL, json=body, timeout=timeout)
+    r.raise_for_status()
+    return (r.json().get("message", {}) or {}).get("content", "") or ""
+
+
 COST_CURRENCY = "₽"
 # Тариф в ₽ за 1000 токенов (вход/выход). tokengate даёт цену за 1М — делим на 1000.
 LLM_PRICES = {
@@ -125,13 +151,8 @@ def add_llm_cost(model, response):
 def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode=False):
     """Использует LLM для умной коррекции слов по контексту без изменения сути"""
     from openai import OpenAI
-    
-    if local_mode:
-        client = make_ollama_client()
-    else:
-        client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
-    
-    prompt = f"""Исправь ошибки транскрибации в тексте звонка. 
+
+    prompt = f"""Исправь ошибки транскрибации в тексте звонка.
     Особенно обрати внимание на названия компаний и термины.
     Контекст: Это разговор с компанией "СтальМетУрал" (также может быть "СМУ", "Стальмет").
     
@@ -163,21 +184,20 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
     {transcript_text[:10000]}
     Верни текст слово в слово, изменив только указанные термины. НЕ добавляй пояснений:"""
     
+    messages = [
+        {"role": "system", "content": "Ты бездушный алгоритм автозамены. Ты никогда не удаляешь оригинальные слова и не меняешь грамматику. Исправляй только ошибки, где слова сильно зажеванны и не представляются доступными для прочтения, сохраняй структуру."},
+        {"role": "user", "content": prompt}
+    ]
     try:
-        response = client.chat.completions.create(
-            model=analysis_model,
-            messages=[
-                {"role": "system", "content": "Ты бездушный алгоритм автозамены. Ты никогда не удаляешь оригинальные слова и не меняешь грамматику. Исправляй только ошибки, где слова сильно зажеванны и не представляются доступными для прочтения, сохраняй структуру." + nothink_suffix(analysis_model)},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=4000,
-            **ollama_options(local_mode)
-        )
-
-        if not local_mode:
+        if local_mode:
+            corrected_text = strip_think(ollama_native_chat(messages, analysis_model,
+                                                            temperature=0.1, max_tokens=4000))
+        else:
+            client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
+            response = client.chat.completions.create(
+                model=analysis_model, messages=messages, temperature=0.1, max_tokens=4000)
             add_llm_cost(analysis_model, response)
-        corrected_text = strip_think(response.choices[0].message.content)
+            corrected_text = strip_think(response.choices[0].message.content)
 
         if "Менеджер:" in corrected_text or "Клиент:" in corrected_text:
             return corrected_text
@@ -191,13 +211,8 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
 def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode=False):
     """Использует LLM для глубокой коррекции ролей спикеров в транскрипции"""
     from openai import OpenAI
-    
-    if local_mode:
-        client = make_ollama_client()
-    else:
-        client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
-    
-    prompt = f"""Перед тобой транскрипция телефонного звонка в компанию "СтальМетУрал". 
+
+    prompt = f"""Перед тобой транскрипция телефонного звонка в компанию "СтальМетУрал".
 Из-за технических особенностей записи нейросеть могла:
 1. Оставить теги в формате "SPEAKER_01 / SPEAKER_02" или перепутать менеджера и клиента.
 2. Склеить фразы двух разных людей в один длинный абзац.
@@ -224,21 +239,20 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
 
 Верни логичный, правильный диалог в формате "👨‍💼 Менеджер: ..." и "👤 Клиент: ...". НЕ добавляй никаких пояснений от себя, только текст диалога."""
 
+    messages = [
+        {"role": "system", "content": "Ты логический редактор. Твоя задача — распутать диалог, переставив теги ролей там, где это необходимо по смыслу. Ты не меняешь слова, но можешь разбивать склеенные абзацы."},
+        {"role": "user", "content": prompt}
+    ]
     try:
-        response = client.chat.completions.create(
-            model=analysis_model,
-            messages=[
-                {"role": "system", "content": "Ты логический редактор. Твоя задача — распутать диалог, переставив теги ролей там, где это необходимо по смыслу. Ты не меняешь слова, но можешь разбивать склеенные абзацы." + nothink_suffix(analysis_model)},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=4000,
-            **ollama_options(local_mode)
-        )
-
-        if not local_mode:
+        if local_mode:
+            corrected_text = strip_think(ollama_native_chat(messages, analysis_model,
+                                                            temperature=0.2, max_tokens=4000))
+        else:
+            client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
+            response = client.chat.completions.create(
+                model=analysis_model, messages=messages, temperature=0.2, max_tokens=4000)
             add_llm_cost(analysis_model, response)
-        corrected_text = strip_think(response.choices[0].message.content)
+            corrected_text = strip_think(response.choices[0].message.content)
 
         if "👨‍💼 Менеджер:" in corrected_text and "👤 Клиент:" in corrected_text:
             return corrected_text
