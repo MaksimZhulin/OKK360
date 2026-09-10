@@ -667,6 +667,7 @@ elif st.session_state.current_step == 3:
                             upload_date,
                             analysis.get("topic", ""),
                             analysis.get("client_request", ""),
+                            analysis.get("nomenclature_str", ""),
                             analysis.get("solution", ""),
                             analysis.get("urgency", ""),
                             analysis.get("client_mood", ""),
@@ -684,7 +685,6 @@ elif st.session_state.current_step == 3:
                             nextstep_block,
                             speech_block,
                             grand_total,
-                            analysis.get("nomenclature_str", ""),
                             analysis.get("recommendations", "")
                         ]
                         all_rows_data.append(row_data)
