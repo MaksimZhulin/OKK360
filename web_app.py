@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 # Распознавание номенклатуры из звонка по каталогу (data/catalog.json)
-from nomenclature import match_mentions, format_nomenclature
+from nomenclature import match_mentions, format_nomenclature, format_volumes
 
 # Windows: консоль по умолчанию cp1251 и падает на эмодзи в print() — принудительно UTF-8
 for _stream in (sys.stdout, sys.stderr):
@@ -276,13 +276,19 @@ elif st.session_state.current_step == 2:
 7. "client_mood": Настроение клиента (выбери одно: Нейтральное / Заинтересованное / Раздраженное / Довольное / Сомневающееся).
 8. "manager_actions": Ключевые действия менеджера (1-2 предложения).
 9. "recommendations": Краткое (1-2 предложения) ФАКТИЧЕСКОЕ наблюдение по сути разговора: что менеджер сделал хорошо и что конкретно упустил. БЕЗ слов "отлично/хорошо/плохо", без процентов и без общей оценки — только конкретика по содержанию. Итоговую оценку и зоны роста посчитает система отдельно.
-9a. "nomenclature_raw": Массив строк — ВСЕ товары/номенклатура, которые упоминались в звонке (что интересует клиента или обсуждается в заказе). ПРАВИЛА:
-- Одна позиция = ОДИН элемент массива, собранный ЦЕЛИКОМ: материал + тип товара + размер/сплав вместе. Пример: ["алюминиевая труба 40 сплав АД31Т1", "арматура 8 мм А500С", "лист 3 мм оцинкованный"].
-- НЕ дроби один товар на куски. НЕПРАВИЛЬНО: ["труба", "40 на 2.5", "сплав АМГ-5"]. ПРАВИЛЬНО: ["алюминиевая труба 40 сплав АМГ-5"].
-- Марку сплава/стали (АМГ-5, АД-31Т1, А500С, 09Г2С) НЕ выписывай отдельным элементом — это свойство товара, присоединяй его к товару.
+9a. "nomenclature_raw": Массив ОБЪЕКТОВ — ВСЕ товары/номенклатура, которые упоминались в звонке (что интересует клиента или обсуждается в заказе). Каждый объект: {"item": "...", "quantity": "...", "unit": "..."}.
+Поле "item" (сам товар):
+- Одна позиция = ОДИН объект, товар собран ЦЕЛИКОМ: материал + тип товара + размер/сплав вместе. Пример item: "алюминиевая труба 40 сплав АД31Т1", "арматура 8 мм А500С", "лист 3 мм оцинкованный".
+- НЕ дроби один товар на куски. НЕПРАВИЛЬНО три объекта "труба"/"40 на 2.5"/"сплав АМГ-5". ПРАВИЛЬНО один item "алюминиевая труба 40 сплав АМГ-5".
+- Марку сплава/стали (АМГ-5, АД-31Т1, А500С, 09Г2С) НЕ выписывай отдельной позицией — это свойство товара, присоединяй к item.
 - Всегда указывай материал/тип товара, если он звучал (не "труба 40", а "алюминиевая труба 40").
 - Если назван только код/модель (МС-140, МС500), добавь тип товара из контекста ("чугунная батарея МС-140").
 - НЕ включай товары, от которых клиент отказался или которые отверг ("нет", "не надо", "не подходит", "тонко", "это не рассматриваем").
+Поле "quantity" (СКОЛЬКО клиент хочет заказать ЭТОЙ позиции) — только число как строка:
+- Приведи устную речь к цифрам: "тонн пять" -> "5", "полтонны" -> "0.5", "пара прутков" -> "2", "штук двадцать" -> "20". Диапазон -> "5-10".
+- Это КОЛИЧЕСТВО заказа, а НЕ размер/диаметр товара. "арматура 8 мм, нужно 5 тонн" -> quantity "5" (не "8"). Если количество не названо -> "".
+Поле "unit" (единица измерения количества) — выбери СТРОГО одну из списка: "т" (тонна), "кг", "м" (метр), "м.п." (метр погонный), "шт", "лист", "пруток", "хлыст", "рулон", "м²", "упак". Если названа транспортом ("фура", "газель", "камаз") — впиши это слово как unit. Если единица не названа -> "".
+Пример: [{"item": "арматура 8 мм А500С", "quantity": "5", "unit": "т"}, {"item": "лист 3 мм оцинкованный", "quantity": "20", "unit": "лист"}].
 Не выдумывай то, чего нет в тексте. Если товары не обсуждались — верни пустой массив [].
 
 БИНАРНЫЕ КРИТЕРИИ (Оценивай строго: 1 = ДА, 0 = НЕТ):
@@ -421,18 +427,33 @@ elif st.session_state.current_step == 2:
                 # Рекомендация строится в коде (вердикт по % + слабые зоны), а не ИИ
                 analysis_result["recommendations"] = build_recommendation(analysis_result)
 
-                # Номенклатура: сырые упоминания от ИИ -> каноничные позиции каталога
+                # Номенклатура: сырые упоминания от ИИ -> каноничные позиции каталога.
+                # nomenclature_raw = массив объектов {item, quantity, unit}; на строки
+                # (старый формат) тоже реагируем — для обратной совместимости.
                 try:
                     _raw_noms = analysis_result.get("nomenclature_raw", []) or []
-                    if isinstance(_raw_noms, str):
+                    if isinstance(_raw_noms, (str, dict)):
                         _raw_noms = [_raw_noms]
-                    _nom_items = match_mentions(_raw_noms)
+                    _mentions, _volumes = [], []
+                    for _r in _raw_noms:
+                        if isinstance(_r, dict):
+                            _mentions.append(str(_r.get("item", "")).strip())
+                            _volumes.append({
+                                "quantity": str(_r.get("quantity", "")).strip(),
+                                "unit": str(_r.get("unit", "")).strip(),
+                            })
+                        else:
+                            _mentions.append(str(_r).strip())
+                            _volumes.append({"quantity": "", "unit": ""})
+                    _nom_items = match_mentions(_mentions)
                     analysis_result["nomenclature"] = _nom_items
                     analysis_result["nomenclature_str"] = format_nomenclature(_nom_items)
+                    analysis_result["volume_str"] = format_volumes(_nom_items, _volumes)
                 except Exception as _nom_err:
                     print(f"⚠️ Матчинг номенклатуры: {_nom_err}")
                     analysis_result["nomenclature"] = []
                     analysis_result["nomenclature_str"] = ""
+                    analysis_result["volume_str"] = ""
 
                 filename = uploaded_file.name
                 base_name = filename[:-4] if filename.lower().endswith(('.mp3', '.wav', '.m4a')) else filename
@@ -566,7 +587,9 @@ elif st.session_state.current_step == 3:
                 st.write(f"  📞 Тип звонка: {type_badge}")
                 st.write(f"  🎯 Тема: {result['analysis'].get('topic', '—')}")
                 _nom_str = result['analysis'].get('nomenclature_str', '')
+                _vol_str = result['analysis'].get('volume_str', '')
                 st.write(f"  📦 Номенклатура: {_nom_str if _nom_str else '—'}")
+                st.write(f"  📊 Объём: {_vol_str if _vol_str else '—'}")
                 st.write(f"  🏆 Общий балл: {grand_display}")
                 st.write(f"  ⭐ Базовый: {score_display}")
                 st.write(f"  🔎 Потребность: {need_display}")
@@ -668,6 +691,7 @@ elif st.session_state.current_step == 3:
                             analysis.get("topic", ""),
                             analysis.get("client_request", ""),
                             analysis.get("nomenclature_str", ""),
+                            analysis.get("volume_str", ""),
                             analysis.get("solution", ""),
                             analysis.get("urgency", ""),
                             analysis.get("client_mood", ""),
@@ -691,7 +715,7 @@ elif st.session_state.current_step == 3:
                     
                     start_row = first_empty_row
                     end_row = first_empty_row + len(successful) - 1
-                    range_to_write = f"{SHEET_NAME}!A{start_row}:Z{end_row}"
+                    range_to_write = f"{SHEET_NAME}!A{start_row}:AA{end_row}"
 
                     # Гарантируем, что в листе достаточно строк (иначе update упадёт
                     # с "exceeds grid limits"). При нехватке — докидываем строки с запасом.
