@@ -26,7 +26,7 @@ from audio import (
 )
 from llm_analysis import (
     COST_CURRENCY, add_llm_cost, smart_text_correction, correct_speaker_roles,
-    strip_think, ollama_native_chat, unload_ollama_model,
+    strip_think, ollama_native_chat, unload_ollama_model, ensure_ollama_running,
 )
 
 # Критерии оценки и подсчёт баллов вынесены в scoring.py
@@ -182,7 +182,12 @@ elif st.session_state.current_step == 2:
         # обрабатываем в две фазы: сначала транскрибируем ВСЕ файлы (GPU занят только
         # WhisperX), затем выгружаем его и анализируем ВСЕ транскрипты (GPU занят только Qwen).
         if local_mode:
-            unload_ollama_model(analysis_model)  # вдруг Qwen висит с прошлого прогона — освобождаем VRAM
+            st.write("🔌 Проверяю локальный сервер Ollama...")
+            if ensure_ollama_running():  # сам поднимет сервер без прокси, если он не запущен
+                unload_ollama_model(analysis_model)  # вдруг Qwen висит с прошлого прогона — освобождаем VRAM
+            else:
+                st.warning("⚠️ Не удалось поднять Ollama — локальный анализ (Фаза 2) может не сработать. "
+                           "Проверь, что Ollama установлена.")
 
         batch_start = time.time()
         transcribed = []  # сырые транскрипты переносим из Фазы 1 в Фазу 2

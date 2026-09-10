@@ -79,6 +79,75 @@ def ollama_native_chat(messages, model, temperature=0.3, max_tokens=2048,
 
 
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
+OLLAMA_VERSION_URL = "http://localhost:11434/api/version"
+
+
+def _ollama_alive(timeout=2):
+    """Отвечает ли локальный сервер Ollama."""
+    import requests
+    try:
+        return requests.get(OLLAMA_VERSION_URL, timeout=timeout).ok
+    except Exception:
+        return False
+
+
+def _find_ollama_exe():
+    """Ищет ollama.exe: сперва в PATH, потом стандартная установка в LOCALAPPDATA."""
+    import shutil
+    import os
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    cand = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe")
+    return cand if os.path.exists(cand) else None
+
+
+def ensure_ollama_running(wait=40):
+    """Гарантирует, что локальный сервер Ollama поднят — БЕЗ системного прокси.
+    Зачем без прокси: при активном HTTP(S)_PROXY Ollama 0.34 виснет на загрузке модели
+    (сетевой вызов уходит на прокси) -> 503 -> локальный анализ пустой. Раньше это решал
+    ручной start_ollama.bat в отдельном окне; теперь приложение поднимает сервер само,
+    фоном и без окна. Если сервер уже отвечает — ничего не делаем.
+    Возвращает True, если Ollama доступна к моменту выхода."""
+    import os
+    import time
+    import subprocess
+
+    if _ollama_alive():
+        return True
+
+    exe = _find_ollama_exe()
+    if not exe:
+        print("⚠️ ollama.exe не найден — установи Ollama или запусти сервер вручную")
+        return False
+
+    # Копия окружения БЕЗ прокси — ключевой момент (иначе Ollama зависнет на загрузке модели).
+    env = dict(os.environ)
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        env.pop(k, None)
+    env["NO_PROXY"] = "*"
+    env["OLLAMA_NO_CLOUD"] = "true"
+    env["OLLAMA_HOST"] = "127.0.0.1:11434"
+
+    creationflags = 0
+    if os.name == "nt":  # фон без консольного окна, переживает закрытие родителя
+        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+
+    try:
+        subprocess.Popen([exe, "serve"], env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=creationflags)
+    except Exception as e:
+        print(f"⚠️ Не удалось запустить Ollama serve: {e}")
+        return False
+
+    for _ in range(wait):
+        if _ollama_alive():
+            print("✅ Ollama поднят автоматически (без прокси)")
+            return True
+        time.sleep(1)
+    print("⚠️ Ollama не ответил за отведённое время")
+    return False
 
 
 def unload_ollama_model(model):
