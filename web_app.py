@@ -29,6 +29,28 @@ from llm_analysis import (
     strip_think, ollama_native_chat, unload_ollama_model, ensure_ollama_running,
 )
 
+def flatten_analysis(obj):
+    """ИИ иногда оборачивает поля в объекты-секции ('ОБЩАЯ ИНФОРМАЦИЯ': {...},
+    'БИНАРНЫЕ КРИТЕРИИ': {...}) — по заголовкам из промпта. Тогда на верхнем уровне лежат
+    не наши ключи (topic, establishing_contact...), а названия секций, и всё читается как
+    «Не определено». Разворачиваем в ПЛОСКИЙ словарь по именам конечных ключей (они у нас
+    уникальны). Списки/скаляры (например nomenclature_raw) остаются значениями как есть.
+    Если ответ уже плоский — ничего не меняется."""
+    flat = {}
+
+    def walk(d):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                walk(v)
+            else:
+                flat[k] = v
+
+    if isinstance(obj, dict):
+        walk(obj)
+        return flat
+    return obj
+
+
 # Критерии оценки и подсчёт баллов вынесены в scoring.py
 from scoring import (
     NEED_CRITERIA, NEED_KEYS, OBJECTION_CRITERIA, OBJ_KEYS,
@@ -409,6 +431,8 @@ elif st.session_state.current_step == 2:
 53. "speech_literacy": Грамотность — логичное и последовательное выражение мысли, без сумбура.
 54. "speech_empathy": Эмпатия — использовал фразы активного слушания ("понимаю вас", "согласен", "верно", "конечно" и подобные).
 
+⚠️ СТРУКТУРА JSON: все ключи — на ОДНОМ верхнем уровне (плоский объект). НЕ группируй их в под-объекты по секциям (никаких "ОБЩАЯ ИНФОРМАЦИЯ": {{...}}). Заголовки секций выше — только для твоего удобства, в JSON их быть не должно.
+
 Верни ТОЛЬКО JSON, без Markdown-разметки и без пояснений:"""
 
                 _an_messages = [
@@ -435,7 +459,8 @@ elif st.session_state.current_step == 2:
                 if json_start != -1 and json_end != -1:
                     json_str = result_text[json_start:json_end + 1]
                     try:
-                        analysis_result = json.loads(json_str)
+                        # flatten: ИИ порой вкладывает поля в объекты-секции — разворачиваем
+                        analysis_result = flatten_analysis(json.loads(json_str))
                     except json.JSONDecodeError:
                         print(f"⚠️ Ошибка парсинга JSON от ИИ. Сырой текст: {result_text}")
                         analysis_result = {}
