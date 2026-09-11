@@ -296,11 +296,15 @@ elif st.session_state.current_step == 2:
                 st.session_state["_file_llm_cost"] = 0.0  # копим стоимость LLM за файл
 
                 st.write("🔍 Коррекция текста...")
+                _t = time.time()
                 transcript_text = smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode)
+                print(f"⏱️ [{uploaded_file.name}] коррекция текста: {time.time()-_t:.0f}с")
                 st.write(f"✅ Коррекция завершена! Символов: {len(transcript_text)}")
 
                 st.write("🔍 Коррекция ролей спикеров...")
+                _t = time.time()
                 transcript_text = correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode)
+                print(f"⏱️ [{uploaded_file.name}] коррекция ролей: {time.time()-_t:.0f}с")
                 st.write("✅ Коррекция ролей завершена!")
 
                 similar_calls = find_similar_calls(transcript_text, top_k=3)
@@ -411,6 +415,7 @@ elif st.session_state.current_step == 2:
                     {"role": "system", "content": "Ты — опытный аналитик колл-центра, специализирующийся на глубоком анализе транскрипций звонков. Твоя цель — предоставить всестороннюю, объективную и профессиональную оценку взаимодействия между клиентом и агентом, выявить ключевые паттерны, проблемы и предложить конкретные, действенные рекомендации. Отвечай строго в формате JSON."},
                     {"role": "user", "content": prompt}
                 ]
+                _t = time.time()
                 if local_mode:
                     # локально: нативный /api/chat с think=False (иначе пустой JSON)
                     result_text = strip_think(ollama_native_chat(_an_messages, analysis_model,
@@ -420,6 +425,10 @@ elif st.session_state.current_step == 2:
                         model=analysis_model, messages=_an_messages, temperature=0.3, max_tokens=2500)
                     add_llm_cost(analysis_model, response)
                     result_text = strip_think(response.choices[0].message.content)
+                # ДИАГНОСТИКА: сколько занял анализ и что реально вернул ИИ (длина + превью в консоль)
+                print(f"⏱️ [{uploaded_file.name}] анализ: {time.time()-_t:.0f}с")
+                print(f"🔎 [анализ {uploaded_file.name}] ответ ИИ: {len(result_text)} симв. | "
+                      f"превью: {result_text[:300]!r}")
                 json_start = result_text.find('{')
                 json_end = result_text.rfind('}')
                 
