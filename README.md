@@ -399,7 +399,8 @@ venv\Scripts\streamlit run web_app.py
 **Открытая конфигурация — `config.py`:** идентификатор целевой Google-таблицы,
 имя файла с ключом, название листа «Выгрузка из проекта» и базовый URL LLM-прокси.
 
-**Переменные окружения:** `DEEPSEEK_API_KEY` — только для CLI-скрипта `analyze_transcripts.py`.
+**Переменные окружения:** `DEEPSEEK_API_KEY` — только для CLI-скрипта `analyze_transcripts.py`;
+`HF_TOKEN` — для CLI-скрипта `process_calls.py` (альтернатива ключу `--hf-token`).
 
 ---
 
@@ -418,7 +419,7 @@ OKK360/
 ├── build_tags.py               # сборка data/tags.json из CSV
 ├── analyze_transcripts.py      # CLI: анализ транскриптов, уже залитых в таблицу
 ├── upload_transcripts.py       # CLI: заливка текстовых транскриптов в Google Sheets
-├── process_calls.py            # CLI (легаси): пакетная транскрибация через openai-whisper
+├── process_calls.py            # CLI: пакетная транскрибация recordings/ (WhisperX + диаризация)
 ├── start_ollama.bat            # ручной запуск Ollama без прокси (запасной вариант)
 ├── requirements.txt            # зависимости (UTF-8; torch из индекса PyTorch cu126)
 ├── data/
@@ -459,9 +460,11 @@ py nomenclature.py
 Три самостоятельные консольные утилиты из более ранней «файловой» схемы работы
 (`recordings/` → `transcripts/` → Google Sheets → анализ). Из веб-приложения не вызываются.
 
-- **`process_calls.py`** — пакетная транскрибация `recordings/*.mp3|wav` в `transcripts/*.txt`.
-  Использует оригинальный `openai-whisper` (модель `small`), без диаризации. **Легаси:**
-  пакет `whisper` отсутствует в `requirements.txt`.
+- **`process_calls.py`** — пакетная транскрибация `recordings/*.mp3|wav|m4a` в
+  `transcripts/<файл>.txt` тем же пайплайном, что и веб-приложение: предобработка ffmpeg,
+  +2 с тишины, WhisperX `large-v3`, выравнивание, диаризация pyannote, роли Менеджер/Клиент.
+  Нужен Hugging Face Token: `venv\Scripts\python process_calls.py --hf-token hf_xxx`
+  (или переменная окружения `HF_TOKEN`). Ключи: `--input`, `--output`, `--no-preprocess`.
 - **`upload_transcripts.py`** — заливает `transcripts/*.txt` в Google Sheets (столбцы A–E),
   перебирает кодировки, вытаскивает дату и клиента из имени файла, создаёт шапку таблицы,
   переносит обработанные файлы в `processed/` и ведёт `upload_log.txt`.
