@@ -56,7 +56,7 @@ from scoring import (
     NEED_CRITERIA, NEED_KEYS, OBJECTION_CRITERIA, OBJ_KEYS,
     DOZHIM_CRITERIA, DOZHIM_KEYS, CONTACT_CRITERIA, CONTACT_KEYS,
     NEXTSTEP_CRITERIA, NEXTSTEP_KEYS, SPEECH_CRITERIA, SPEECH_KEYS,
-    block_score_1_5, build_recommendation,
+    block_score_1_5, block_max, grand_max, build_recommendation,
 )
 
 
@@ -68,6 +68,8 @@ if 'processing_results' not in st.session_state:
     st.session_state.processing_results = []
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1
+if 'sheets_saved' not in st.session_state:
+    st.session_state.sheets_saved = None  # итог последней выгрузки в Sheets (строки + ссылка)
 
 st.title("🎤 МАССОВЫЙ АНАЛИЗ ТЕЛЕФОННЫХ ЗВОНКОВ")
 st.markdown("---")
@@ -167,16 +169,11 @@ if st.session_state.current_step == 1:
             for i, file in enumerate(uploaded_files):
                 st.write(f"{i+1}. {file.name} ({file.size / 1024:.1f} KB)")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Очистить", type="secondary"):
-                st.session_state.uploaded_files = []
-                st.rerun()
-        with col2:
-            if st.button("🚀 Начать обработку", type="primary"):
-                st.session_state.current_step = 2
-                st.session_state.processing_results = []
-                st.rerun()
+        if st.button("🚀 Начать обработку", type="primary"):
+            st.session_state.current_step = 2
+            st.session_state.processing_results = []
+            st.session_state.sheets_saved = None  # новый прогон — прошлая выгрузка не актуальна
+            st.rerun()
 
 # =============== ШАГ 2: ОБРАБОТКА ===============
 elif st.session_state.current_step == 2:
@@ -659,9 +656,9 @@ elif st.session_state.current_step == 3:
                 dozhim_display = "Н/О" if is_tech_issue else f"{dozhim_score}/5"
                 contact_display = "Н/О" if is_tech_issue else f"{contact_score}/5"
                 nextstep_display = "Н/О" if is_tech_issue else f"{nextstep_score}/5"
-                speech_display = "Н/О" if is_tech_issue else f"{speech_score}/5"
+                speech_display = "Н/О" if is_tech_issue else f"{speech_score}/{block_max(SPEECH_KEYS)}"
                 grand = total_score + need_score + dozhim_score + contact_score + nextstep_score + speech_score + (obj_score if had_obj else 0)
-                grand_display = "Н/О (Брак связи)" if is_tech_issue else f"{grand}/33"
+                grand_display = "Н/О (Брак связи)" if is_tech_issue else f"{grand}/{grand_max(had_obj)}"
                 
                 call_type = analysis.get('call_type', 'Первичный')
                 type_badge = "🔄 Повторный" if call_type == "Повторный" else "🆕 Первичный"
@@ -699,15 +696,18 @@ elif st.session_state.current_step == 3:
     with col1:
         if st.button("← Обработать ещё", type="secondary"):
             st.session_state.current_step = 1
+            st.session_state.sheets_saved = None
             st.rerun()
-    
+
     with col2:
         if st.button("📋 Просмотреть детали", type="secondary"):
             st.session_state.current_step = 4
             st.rerun()
-    
+
     with col3:
-        if successful and st.button("💾 Сохранить в Google Sheets", type="primary"):
+        # После успешной выгрузки кнопка гаснет — повторный клик задвоил бы строки в таблице
+        if successful and st.button("💾 Сохранить в Google Sheets", type="primary",
+                                    disabled=bool(st.session_state.sheets_saved)):
             with st.spinner("Сохраняю в таблицу..."):
                 try:
                     credentials = service_account.Credentials.from_service_account_file(
@@ -716,16 +716,18 @@ elif st.session_state.current_step == 3:
                     )
                     service = build('sheets', 'v4', credentials=credentials)
 
-                    range_to_check = f"{SHEET_NAME}!A:A"
-                    result_sheets = service.spreadsheets().values().get(
+                    # Последняя занятая строка — по нескольким столбцам, а не только по A:
+                    # если в последних строках A пустой, а остальное заполнено, запись по
+                    # одному A легла бы поверх данных. Столбец D (транскрипт до 99к символов)
+                    # не читаем — он тяжёлый, а строка без D всё равно видна по соседним.
+                    # API отдаёт строки до последней непустой, поэтому len() = её номер.
+                    check = service.spreadsheets().values().batchGet(
                         spreadsheetId=SPREADSHEET_ID,
-                        range=range_to_check
+                        ranges=[f"{SHEET_NAME}!A:C", f"{SHEET_NAME}!E:AA"]
                     ).execute()
-                    
-                    values = result_sheets.get('values', [])
-                    first_empty_row = len(values) + 1
-                    if first_empty_row == 1:
-                        first_empty_row = 2
+                    last_row = max((len(vr.get('values', [])) for vr in check.get('valueRanges', [])),
+                                   default=0)
+                    first_empty_row = max(last_row + 1, 2)  # строка 1 — шапка
                     
                     all_rows_data = []
                     now = datetime.now()
@@ -804,12 +806,12 @@ elif st.session_state.current_step == 3:
 
                     # Гарантируем, что в листе достаточно строк (иначе update упадёт
                     # с "exceeds grid limits"). При нехватке — докидываем строки с запасом.
+                    sheet_id, current_rows = None, 0
                     try:
                         meta = service.spreadsheets().get(
                             spreadsheetId=SPREADSHEET_ID,
                             fields="sheets(properties(sheetId,title,gridProperties/rowCount))"
                         ).execute()
-                        sheet_id, current_rows = None, 0
                         for sh in meta.get('sheets', []):
                             if sh['properties']['title'] == SHEET_TITLE:
                                 sheet_id = sh['properties']['sheetId']
@@ -828,29 +830,43 @@ elif st.session_state.current_step == 3:
 
                     body = {'values': all_rows_data}
                     
-                    result_update = service.spreadsheets().values().update(
+                    service.spreadsheets().values().update(
                         spreadsheetId=SPREADSHEET_ID,
                         range=range_to_write,
                         valueInputOption='RAW',
                         body=body
                     ).execute()
-                    
-                    st.success(f"✅ Сохранено {len(successful)} записей в строки {start_row}-{end_row}!")
-                    st.balloons()
-                    
-                    st.markdown(f"""
-                    **📎 Ссылка на таблицу:**
-                    https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid=0&range=A{start_row}
-                    """)
-                    
-                    if st.button("🔄 Начать новую сессию"):
-                        st.session_state.current_step = 1
-                        st.session_state.uploaded_files = []
-                        st.session_state.processing_results = []
-                        st.rerun()
-                    
+
+                    # Итог кладём в session_state и перерисовываем страницу: сообщение и
+                    # кнопка «Начать новую сессию» живут ВНЕ обработчика этой кнопки.
+                    # (Раньше вложенная кнопка не срабатывала никогда: её клик перезапускает
+                    # скрипт, внешняя кнопка в новом прогоне уже False, и до неё не доходит.)
+                    st.session_state.sheets_saved = {
+                        "count": len(successful), "start_row": start_row, "end_row": end_row,
+                        "gid": sheet_id if sheet_id is not None else 0,
+                        "fresh": True,  # шарики показать один раз
+                    }
+                    st.rerun()
+
                 except Exception as e:
                     st.error(f"❌ Ошибка сохранения: {str(e)}")
+
+    saved = st.session_state.sheets_saved
+    if saved:
+        st.success(f"✅ Сохранено {saved['count']} записей в строки {saved['start_row']}-{saved['end_row']}!")
+        if saved.get("fresh"):
+            st.balloons()
+            saved["fresh"] = False
+        st.markdown(f"""
+        **📎 Ссылка на таблицу:**
+        https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid={saved['gid']}&range=A{saved['start_row']}
+        """)
+        if st.button("🔄 Начать новую сессию"):
+            st.session_state.current_step = 1
+            st.session_state.uploaded_files = []
+            st.session_state.processing_results = []
+            st.session_state.sheets_saved = None
+            st.rerun()
 
 elif st.session_state.current_step == 4:
     st.header("4. 📋 Детальный просмотр")
@@ -916,7 +932,7 @@ elif st.session_state.current_step == 4:
             st.markdown("---")
             st.markdown("#### 🔎 Блок «Потребность» (выявление ситуации клиента)")
             need_count = 0
-            for label, key in NEED_CRITERIA:
+            for key, label in NEED_CRITERIA:  # в scoring.py кортежи (ключ, подпись)
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
                 need_count += score
@@ -932,7 +948,7 @@ elif st.session_state.current_step == 4:
             st.markdown("---")
             st.markdown("#### 🛡️ Блок «Возражения» (отработка возражений клиента)")
             obj_count = 0
-            for label, key in OBJECTION_CRITERIA:
+            for key, label in OBJECTION_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
                 obj_count += score
@@ -951,7 +967,7 @@ elif st.session_state.current_step == 4:
             st.markdown("---")
             st.markdown("#### 🎯 Блок «Дожим» (закрытие сделки)")
             dozhim_count = 0
-            for label, key in DOZHIM_CRITERIA:
+            for key, label in DOZHIM_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
                 dozhim_count += score
@@ -967,7 +983,7 @@ elif st.session_state.current_step == 4:
             st.markdown("---")
             st.markdown("#### 📇 Блок «Кл/счёт, контактные данные»")
             contact_count = 0
-            for label, key in CONTACT_CRITERIA:
+            for key, label in CONTACT_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
                 contact_count += score
@@ -983,7 +999,7 @@ elif st.session_state.current_step == 4:
             st.markdown("---")
             st.markdown("#### ➡️ Блок «Следующий шаг / завершение»")
             nextstep_count = 0
-            for label, key in NEXTSTEP_CRITERIA:
+            for key, label in NEXTSTEP_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
                 nextstep_count += score
@@ -999,24 +1015,25 @@ elif st.session_state.current_step == 4:
             st.markdown("---")
             st.markdown("#### 🗣️ Блок «Речь»")
             speech_count = 0
-            for label, key in SPEECH_CRITERIA:
+            for key, label in SPEECH_CRITERIA:
                 value = result['analysis'].get(key, 0)
                 score = 1 if value == 1 else 0
                 speech_count += score
                 icon = "✅" if score == 1 else "❌"
                 st.markdown(f"{icon} **{label}:** {'Да' if score == 1 else 'Нет'}")
             speech_score = max(1, min(speech_count, 5))
+            speech_max = block_max(SPEECH_KEYS)  # критериев 2 -> максимум 2, а не 5
             if is_tech_issue:
                 st.markdown("### 📊 Речь: **Н/О (Брак связи)**")
             else:
-                st.markdown(f"### 📊 Речь: **{speech_score}/5**  _(действий: {speech_count})_")
-                st.progress(speech_score / 5)
+                st.markdown(f"### 📊 Речь: **{speech_score}/{speech_max}**  _(действий: {speech_count})_")
+                st.progress(speech_score / speech_max)
 
             st.markdown("---")
             if is_tech_issue:
                 st.markdown("## 🏆 Общий балл: **Н/О (Брак связи)**")
             else:
                 grand = total_score + need_score + dozhim_score + contact_score + nextstep_score + speech_score + (obj_score if had_obj else 0)
-                st.markdown(f"## 🏆 Общий балл: **{grand} / 33**")
+                st.markdown(f"## 🏆 Общий балл: **{grand} / {grand_max(had_obj)}**")
 
         if st.button("← Назад"): st.session_state.current_step = 3; st.rerun()

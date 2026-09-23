@@ -79,6 +79,11 @@ def block_score_1_5(analysis, keys):
     return max(1, min(count, 5))
 
 
+def block_max(keys):
+    """Максимум балла блока: 5, но не больше числа критериев (у «Речи» их 2 -> максимум 2)."""
+    return min(len(keys), 5)
+
+
 # Базовые критерии (ключ, подпись) — для рекомендаций
 BASE_CRITERIA_LABELS = [
     ("establishing_contact", "Установление контакта"),
@@ -100,6 +105,11 @@ REC_BLOCKS = [
 GRAND_MAX = 33  # 6 базовых + Потребность/Возражения/Дожим/Кл-счёт/Шаг по 5 + Речь 2
 
 
+def grand_max(had_obj):
+    """Максимум общего балла: без возражений блок «Возражения» не применим -> 33 - 5 = 28."""
+    return GRAND_MAX if had_obj else GRAND_MAX - block_max(OBJ_KEYS)
+
+
 def build_recommendation(analysis):
     """Детерминированная рекомендация: вердикт по % от максимума + конкретные слабые зоны."""
     if str(analysis.get("technical_issue", "0")).strip() == "1":
@@ -109,11 +119,10 @@ def build_recommendation(analysis):
     grand = sum(int(analysis.get(k, 0) or 0) for k, _ in BASE_CRITERIA_LABELS)
     weak = [label for k, label in BASE_CRITERIA_LABELS if int(analysis.get(k, 0) or 0) == 0]
 
-    max_total = GRAND_MAX
+    max_total = grand_max(had_obj)
     for name, keys, advice in REC_BLOCKS:
         if name == "Возражения" and not had_obj:
-            max_total -= 5  # возражений не было — блок не применим
-            continue
+            continue  # возражений не было — блок не применим (максимум уже снижен)
         sc = block_score_1_5(analysis, keys)
         grand += sc
         if sc <= 1:
