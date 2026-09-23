@@ -272,8 +272,9 @@ scope `spreadsheets`). Ищется первая пустая строка по 
 | `streamlit` | 1.58.0 | веб-интерфейс, состояние сессии, кэш моделей |
 | `openai` | 2.42.0 | клиент к OpenAI-совместимым эндпоинтам (**новый SDK, не 0.28**) |
 | `whisperx` | 3.8.6 | распознавание речи + пословное выравнивание + диаризация |
-| `torch` | 2.8.0 | бэкенд WhisperX, управление VRAM |
-| `torchaudio` | 2.8.0 | аудио-бэкенд |
+| `torch` | 2.8.0+cu126 | бэкенд WhisperX, управление VRAM |
+| `torchaudio` | 2.8.0+cu126 | аудио-бэкенд |
+| `torchvision` | 0.23.0+cu126 | зависимость WhisperX (ставится в паре с torch) |
 | `soundfile` | 0.14.0 | чтение/запись wav (добавление тишины) |
 | `numpy` | 2.4.6 | работа с аудио-буферами |
 | `requests` | 2.34.2 | нативный API Ollama, Yandex SpeechKit, Object Storage |
@@ -341,10 +342,9 @@ git clone https://github.com/MaksimZhulin/OKK360.git
 cd OKK360
 
 py -3.12 -m venv venv
+# ставит всё, включая torch/torchaudio/torchvision под CUDA 12.6:
+# индекс PyTorch (cu126) прописан прямо в requirements.txt
 venv\Scripts\pip install -r requirements.txt
-
-# torch/torchaudio с поддержкой CUDA 12.6 (если нужна работа на GPU)
-venv\Scripts\pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
 
 # ffmpeg, если его ещё нет
 winget install Gyan.FFmpeg
@@ -420,7 +420,7 @@ OKK360/
 ├── upload_transcripts.py       # CLI: заливка текстовых транскриптов в Google Sheets
 ├── process_calls.py            # CLI (легаси): пакетная транскрибация через openai-whisper
 ├── start_ollama.bat            # ручной запуск Ollama без прокси (запасной вариант)
-├── requirements.txt            # зависимости (файл в кодировке UTF-16)
+├── requirements.txt            # зависимости (UTF-8; torch из индекса PyTorch cu126)
 ├── data/
 │   ├── tags.json               # 34 490 тегов товаров
 │   ├── catalog.json            # 3 168 категорий каталога
