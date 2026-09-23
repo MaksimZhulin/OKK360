@@ -23,33 +23,10 @@ def strip_think(text):
     return _THINK_RE.sub("", text).strip()
 
 
-def nothink_suffix(model):
-    """Для Qwen3 мягко отключаем режим размышлений через маркер /no_think (быстрее,
-    чище JSON). Для остальных моделей (gemini и т.д.) — пустая строка, ничего не меняем."""
-    return " /no_think" if model and "qwen" in str(model).lower() else ""
-
-
 # Контекст для локальных моделей Ollama. Дефолт Ollama ~4096 токенов обрезал бы наш
 # большой промпт (критерии + транскрипт до 10к симв. + примеры ≈ 8-9к токенов) —
 # расширяем, иначе анализ идёт по обрезанному тексту. Для облака параметр не шлём.
 LOCAL_NUM_CTX = 12288
-
-
-def ollama_options(local_mode):
-    """kwargs для create(): локальным моделям задаём num_ctx (расширенный контекст).
-    Облаку — пусто, вызов остаётся байт-в-байт прежним (gemini не трогаем)."""
-    if not local_mode:
-        return {}
-    return {"extra_body": {"options": {"num_ctx": LOCAL_NUM_CTX}}}
-
-
-def make_ollama_client():
-    """Клиент к локальной Ollama. Большой timeout + много ретраев: холодная загрузка
-    крупной модели (14B) в память длится дольше дефолтных ретраев OpenAI-клиента,
-    из-за чего первый вызов ловил 503. С запасом ретраев холодный старт переживается."""
-    from openai import OpenAI
-    return OpenAI(api_key="ollama", base_url="http://localhost:11434/v1",
-                  timeout=600, max_retries=8)
 
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
