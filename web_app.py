@@ -1,7 +1,7 @@
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Windows: консоль по умолчанию cp1251 и падает на эмодзи в print() — принудительно UTF-8
 for _stream in (sys.stdout, sys.stderr):
@@ -14,7 +14,8 @@ import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from config import SPREADSHEET_ID, CREDENTIALS_FILE, SHEET_NAME, SHEET_TITLE
-from audio import WHISPERX_AVAILABLE
+import timing_stats
+from audio import WHISPERX_AVAILABLE, audio_duration
 from llm_analysis import COST_CURRENCY
 # Сама обработка (транскрибация, анализ, пауза/стоп) — в pipeline.py, в фоновом потоке
 from pipeline import fmt_duration, start_job, get_job, TEMP_DIR
@@ -184,19 +185,74 @@ with st.sidebar:
     st.markdown(f"✅ Успешно: **{len([r for r in st.session_state.processing_results if r['status'] == 'success'])}**")
     st.markdown(f"❌ Ошибок: **{len([r for r in st.session_state.processing_results if r['status'] == 'error'])}**")
 
+def current_run_cfg():
+    """Настройки прогона из боковой панели — для старта и для прогноза времени."""
+    return {
+        "local_mode": st.session_state.get("local_mode_checkbox", False),
+        "analysis_model": analysis_model,
+        "api_key": deepseek_key,
+        "transcription_method": st.session_state.get("transcription_method_select",
+                                                     "WhisperX + диаризация (локально)"),
+        "hf_token": hf_token,
+        "preprocess": st.session_state.get("preprocess_audio_checkbox", True),
+        "yandex": {"api_key": yandex_api_key, "access_key_id": aws_access_key_id,
+                   "secret_access_key": aws_secret_access_key, "bucket": yandex_bucket},
+    }
+
+
+def show_time_estimate(durations, approx_n, cfg):
+    """Прогноз времени всего прогона до старта — пересчитывается при смене настроек."""
+    est = timing_stats.estimate(durations, cfg)
+    finish = datetime.now() + timedelta(seconds=est["total"])
+    day = "" if finish.date() == datetime.now().date() else f" {finish:%d.%m}"
+    st.markdown(f"#### ⏱️ Обработка займёт ≈ {fmt_duration(est['total'])} "
+                f"(окончание ≈ {finish:%H:%M}{day})")
+    whisperx = "WhisperX" in cfg["transcription_method"]
+    parts = []
+    if est["load"]:
+        parts.append(f"загрузка моделей ≈ {fmt_duration(est['load'])}")
+    parts.append(f"транскрибация ({'WhisperX' if whisperx else 'Yandex SpeechKit'}) "
+                 f"≈ {fmt_duration(est['transcribe'])}")
+    parts.append(f"анализ ({cfg['analysis_model']}, {'локально' if cfg['local_mode'] else 'облако'}) "
+                 f"≈ {fmt_duration(est['analyze'])}")
+    st.caption(f"Аудио: {len(durations)} файлов, всего {fmt_duration(sum(durations))} · " + " · ".join(parts))
+    missing = [name for name, n in (("транскрибация", est["n_transcribe"]),
+                                    ("анализ", est["n_analyze"])) if not n]
+    if missing:
+        st.caption(f"⚠️ Для этих настроек ещё нет замеров ({', '.join(missing)}) — оценка по стартовым "
+                   "значениям, приблизительная. Станет точной после первого прогона с ними.")
+    else:
+        st.caption(f"Оценка по замерам на этом компьютере с этими настройками: транскрибация — "
+                   f"{est['n_transcribe']} файлов, анализ — {est['n_analyze']} файлов. "
+                   "Во время прогона уточняется по фактической скорости.")
+    if approx_n:
+        st.caption(f"У {approx_n} файлов длительность определена по размеру — для них оценка грубее.")
+
+
 # =============== ШАГ 1: ЗАГРУЗКА ===============
 if st.session_state.current_step == 1:
     st.header("1. 📁 Загрузите аудиофайлы")
     if st.session_state.get("flash"):
         st.info(st.session_state.pop("flash"))
     uploaded_files = st.file_uploader("Перетащите файлы", type=['mp3', 'wav', 'm4a'], accept_multiple_files=True, label_visibility="collapsed")
-    
+
     if uploaded_files:
         st.session_state.uploaded_files = uploaded_files
+        # Длительность аудио — основа прогноза времени (считаем один раз на файл)
+        _dur_cache = st.session_state.setdefault("audio_durations", {})
+        durations, approx_n = [], 0
+        for f in uploaded_files:
+            key = (f.name, f.size)
+            if key not in _dur_cache:
+                _dur_cache[key] = audio_duration(f.getvalue(), f.name)
+            d, exact = _dur_cache[key]
+            durations.append(d)
+            approx_n += not exact
         with st.expander(f"📋 Загружено: {len(uploaded_files)}", expanded=True):
-            for i, file in enumerate(uploaded_files):
-                st.write(f"{i+1}. {file.name} ({file.size / 1024:.1f} KB)")
-        
+            for i, (file, d) in enumerate(zip(uploaded_files, durations)):
+                st.write(f"{i+1}. {file.name} — {fmt_duration(d)} ({file.size / 1024:.1f} KB)")
+        show_time_estimate(durations, approx_n, current_run_cfg())
+
         if st.button("🚀 Начать обработку", type="primary"):
             st.session_state.current_step = 2
             st.session_state.processing_results = []
@@ -216,17 +272,7 @@ elif st.session_state.current_step == 2:
                 st.session_state.current_step = 1
                 st.rerun()
             st.stop()
-        job = start_job(st.session_state.uploaded_files, {
-            "local_mode": st.session_state.get("local_mode_checkbox", False),
-            "analysis_model": analysis_model,
-            "api_key": deepseek_key,
-            "transcription_method": st.session_state.get("transcription_method_select",
-                                                         "WhisperX + диаризация (локально)"),
-            "hf_token": hf_token,
-            "preprocess": st.session_state.get("preprocess_audio_checkbox", True),
-            "yandex": {"api_key": yandex_api_key, "access_key_id": aws_access_key_id,
-                       "secret_access_key": aws_secret_access_key, "bucket": yandex_bucket},
-        })
+        job = start_job(st.session_state.uploaded_files, current_run_cfg())
 
     if not job.active:
         claim_job(job)  # прогон закончился — забираем результаты и уходим со страницы
@@ -282,19 +328,23 @@ elif st.session_state.current_step == 2:
 
         n = max(1, job.phase_total)
         text = f"Фаза {job.phase} из 2 · {job.phase_name} · готово {job.phase_done} из {job.phase_total}"
-        eta = job.phase_eta()
-        if eta is not None and status != "paused":
-            text += f" · до конца фазы ≈ {fmt_duration(eta)}"
         st.progress(min(1.0, ((job.phase - 1) + job.phase_done / n) / 2), text=text)
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        eta = job.eta()
+        finish = datetime.now() + timedelta(seconds=eta)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("🎤 Транскрибировано", f"{job.transcribed_n} / {job.total}")
         c2.metric("🧠 Проанализировано", f"{job.analysed_n} / {job.total}")
         c3.metric("❌ Ошибок", job.errors_n)
         c4.metric("⏱️ Прошло", fmt_duration(job.elapsed()),
                   f"пауза {fmt_duration(job.paused_total)}" if job.paused_total >= 1 else None,
                   delta_color="off")
-        c5.metric("💰 Стоимость ИИ", f"{job.cost_now():.2f} {COST_CURRENCY}")
+        c5.metric("⏳ Осталось ≈", fmt_duration(eta),
+                  "на паузе" if status == "paused" else f"окончание ≈ {finish:%H:%M}",
+                  delta_color="off",
+                  help="Прогноз по замерам на этом компьютере для выбранных настроек и длительности "
+                       "оставшихся файлов; уточняется по фактической скорости этого прогона.")
+        c6.metric("💰 Стоимость ИИ", f"{job.cost_now():.2f} {COST_CURRENCY}")
 
         for level, msg in job.notes:
             getattr(st, level)(msg)

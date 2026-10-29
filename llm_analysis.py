@@ -294,6 +294,32 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
         return strip_think(response.choices[0].message.content or "")
 
 
+def check_model_access(model, api_key):
+    """Пробный крошечный запрос к облачной модели ДО начала прогона: неверный ключ,
+    закрытая для ключа модель или лежащий шлюз обнаруживаются за секунды, а не после
+    часа транскрибации (когда все расшифровки пропадают). None — всё в порядке,
+    иначе — понятное описание проблемы."""
+    from openai import AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError
+    try:
+        llm_chat([{"role": "user", "content": "Ответь одним словом: ок"}], model, api_key,
+                 temperature=0, max_tokens=16, label=f"проверка доступа к {model}")
+        return None
+    except AuthenticationError:
+        return ("API-ключ не принят шлюзом (401). Проверьте ключ в боковой панели — "
+                "его можно скопировать в AgentPlatform → Доступ к моделям → Ключи.")
+    except PermissionDeniedError as e:
+        return (f"Ключу не разрешена модель «{model}» (403: {e}). Разрешите эту модель для ключа "
+                "в AgentPlatform → Доступ к моделям → Ключи (или создайте ключ с доступом к ней), "
+                "либо выберите другую модель.")
+    except NotFoundError:
+        return f"Шлюз не знает модель «{model}» (404) — проверьте название в каталоге моделей."
+    except BadRequestError as e:
+        return f"Шлюз отклонил запрос к модели «{model}» (400): {e}"
+    except Exception as e:
+        return (f"Шлюз ИИ недоступен ({type(e).__name__}: {e}). Транскрибацию не начинаю — "
+                "без анализа её результаты всё равно пропадут. Попробуйте позже.")
+
+
 def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode=False, label="", cancel=None):
     """Использует LLM для умной коррекции слов по контексту без изменения сути"""
     prompt = f"""Исправь ошибки транскрибации в тексте звонка.

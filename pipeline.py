@@ -5,22 +5,26 @@
 показывает прогресс и отправляет команды пауза / продолжить / стоп.
 """
 import os
+import sys
 import json
 import time
+import types
 import threading
 import traceback
 from datetime import datetime
 
+import timing_stats
 from nomenclature import match_mentions, format_nomenclature, format_volumes
 from auto_learning import save_to_knowledge_base, calculate_confidence, find_similar_calls, get_database_stats
 from audio import (
     WHISPERX_AVAILABLE, preprocess_audio, pad_audio_simple_silence,
     transcribe_with_yandex, transcribe_with_whisperx_diarization,
-    unload_whisperx_from_vram, is_cuda_error,
+    unload_whisperx_from_vram, is_cuda_error, audio_duration, warmup_whisperx,
 )
 from llm_analysis import (
     COST_CURRENCY, llm_chat, LLMCancelled, smart_text_correction, correct_speaker_roles,
     unload_ollama_model, ensure_ollama_running, reset_file_cost, get_file_cost,
+    check_model_access,
 )
 from run_log import RunLog
 
@@ -286,6 +290,11 @@ class Cancelled(BaseException):
     (except Exception) не приняли остановку за ошибку и не продолжили прогон."""
 
 
+class PreflightFailed(Exception):
+    """Проверка перед стартом не прошла (ключ, доступ к модели, шлюз) — прогон
+    не начинаем, чтобы не тратить время на транскрибацию впустую."""
+
+
 class Job:
     """Один прогон пачки файлов. В процессе одновременно живёт только один
     (видеокарта одна) — см. start_job()/get_job()."""
@@ -324,6 +333,19 @@ class Job:
         self.results = []
         self.notes = []             # [(level, текст)] — важное, показываем на экране
         self.phase_times = {}
+
+        # Прогноз времени: длительность каждого аудио + модели скорости по замерам
+        # этого компьютера для выбранных настроек (timing_stats).
+        self.durations = [audio_duration(f.getvalue(), f.name)[0] for f in self.files]
+        self._t_rate = timing_stats.Rate(timing_stats.transcribe_key(self.cfg))
+        self._a_rate = timing_stats.Rate(timing_stats.analyze_key(self.cfg))
+        self._load_left = (timing_stats.Rate("load|whisperx").predict(0)
+                           if "WhisperX" in self.cfg["transcription_method"] else 0.0)
+        self._p1 = []               # [(прогноз, факт)] по готовым файлам фазы 1
+        self._p2 = []               # то же для фазы 2
+        self._queue2 = []           # длительности файлов, ждущих анализа
+        self._file_start = None     # clock() начала текущего файла
+        self._file_pred = 0.0       # прогноз текущего файла
 
         self._thread = threading.Thread(target=self._run, name="okk-job", daemon=True)
 
@@ -368,12 +390,37 @@ class Job:
             paused += time.time() - self.pause_started
         return end - self.started - paused
 
-    def phase_eta(self):
-        """Оценка остатка текущей фазы (сек) или None, пока нечего усреднять."""
-        if not self.phase_done:
-            return None
-        per_file = (self.clock() - self.phase_start) / self.phase_done
-        return per_file * (self.phase_total - self.phase_done)
+    @staticmethod
+    def _speed(pairs):
+        """Во сколько раз этот прогон идёт медленнее/быстрее прогноза (по 2+ файлам).
+        Ограничиваем 0.1–10×: защита от абсурда, но и стартовые значения, ошибшиеся
+        в разы (новые настройки без замеров), быстро подстраиваются под факт."""
+        if len(pairs) < 2:
+            return 1.0
+        pred = sum(p for p, _ in pairs)
+        fact = sum(f for _, f in pairs)
+        return min(10.0, max(0.1, fact / pred)) if pred > 0 else 1.0
+
+    def eta(self):
+        """Сколько секунд осталось до конца ВСЕГО прогона: оставшиеся файлы × модель
+        скорости (по замерам) × поправка на фактическую скорость этого прогона."""
+        if not self.active:
+            return 0.0
+        done = self.phase_done
+        in_file = self._file_start is not None
+        if self.phase == 1:
+            k = self._speed(self._p1)
+            # текущий файл — остаток его прогноза; дальше — файлы, которые ещё не начаты
+            cur_left = max(0.0, self._file_pred * k - (self.clock() - self._file_start)) if in_file else 0.0
+            pending = self.durations[done + 1:] if in_file else self.durations[done:]
+            left1 = self._load_left + cur_left + sum(self._t_rate.predict(d) for d in pending) * k
+            # в анализ пойдут уже расшифрованные + текущий + ещё не начатые
+            left2 = sum(self._a_rate.predict(d) for d in self._queue2 + self.durations[done:])
+            return left1 + left2
+        k = self._speed(self._p2)
+        cur_left = max(0.0, self._file_pred * k - (self.clock() - self._file_start)) if in_file else 0.0
+        pending = self._queue2[done + 1:] if in_file else self._queue2[done:]
+        return cur_left + sum(self._a_rate.predict(d) for d in pending) * k
 
     def cost_now(self):
         return self.cost_total + (get_file_cost() if self.active else 0.0)
@@ -424,6 +471,10 @@ class Job:
             try:
                 self._process()
                 self.outcome = "done"
+            except PreflightFailed as e:
+                self.error = str(e)
+                self._note(f"🛑 Прогон не начат: {e}", level="error")
+                self.outcome = "failed"
             except Cancelled:
                 print("⏹️ Прогон остановлен пользователем — результаты сброшены")
                 self._release_gpu()
@@ -456,6 +507,8 @@ class Job:
 
         print(f"===== Прогон: {total_files} файлов · транскрибация: {cfg['transcription_method']} · "
               f"анализ: {analysis_model} ({'локально' if local_mode else 'облако'}) =====")
+        print(f"Аудио всего: {fmt_duration(sum(self.durations))} · прогноз на старте: "
+              f"{fmt_duration(self.eta())} (замеров: транскрибация {self._t_rate.n}, анализ {self._a_rate.n})")
         # На 12 ГБ VRAM WhisperX large-v3 и Qwen-14B одновременно не помещаются, поэтому
         # обрабатываем в две фазы: сначала транскрибируем ВСЕ файлы (GPU занят только
         # WhisperX), затем выгружаем его и анализируем ВСЕ транскрипты (GPU занят только Qwen).
@@ -467,6 +520,15 @@ class Job:
                 self._note("⚠️ Не удалось поднять Ollama — локальный анализ (Фаза 2) может не сработать. "
                            "Проверь, что Ollama установлена.")
 
+        # Облачная модель: проверяем ключ и доступ к модели ДО транскрибации
+        if not local_mode:
+            self.stage, self.stage_file = "🔑 Проверяю доступ к модели анализа...", ""
+            problem = check_model_access(analysis_model, api_key)
+            reset_file_cost()
+            if problem:
+                raise PreflightFailed(problem)
+            print(f"✅ Модель {analysis_model} доступна")
+
         transcribed = []  # сырые транскрипты переносим из Фазы 1 в Фазу 2
         gpu_fail_streak = 0
         gpu_broken = False
@@ -474,6 +536,21 @@ class Job:
 
         # ============ ФАЗА 1: ТРАНСКРИБАЦИЯ (GPU = только WhisperX) ============
         self._start_phase(1, "Транскрибация", total_files)
+        # Модели WhisperX грузим отдельным шагом: загрузка меряется сама по себе,
+        # а время первого файла не раздувается (точнее и прогноз, и замеры).
+        if use_whisperx and cfg["hf_token"] and WHISPERX_AVAILABLE:
+            self.checkpoint()
+            self.stage, self.stage_file = "⏳ Загрузка моделей распознавания (WhisperX)...", ""
+            t0 = self.clock()
+            try:
+                warmup_whisperx(cfg["hf_token"])
+                t_load = self.clock() - t0
+                print(f"⏱️ Модели WhisperX готовы за {fmt_duration(t_load)}")
+                if t_load > 3:  # модели действительно грузились, а не были уже в памяти
+                    timing_stats.record("load|whisperx", 1.0, t_load)
+            except Exception as e:
+                print(f"⚠️ Предзагрузка WhisperX не удалась (повторится на первом файле): {e}")
+        self._load_left = 0.0
         for i, uploaded_file in enumerate(files, 1):
             fname = uploaded_file.name
             file_start = self.clock()
@@ -482,6 +559,9 @@ class Job:
                            "перезапустите приложение и обработайте файл заново", 0.0)
                 self.phase_done += 1
                 continue
+
+            dur = self.durations[i - 1]
+            self._file_start, self._file_pred = file_start, self._t_rate.predict(dur)
 
             # Временные файлы — удаляем в finally (и при «Стопе» тоже)
             original_temp_path = None
@@ -524,10 +604,14 @@ class Job:
 
                 t_phase1 = self.clock() - file_start
                 transcribed.append({'uploaded_file': uploaded_file, 'transcript': transcript_text,
-                                    't_phase1': t_phase1})
+                                    't_phase1': t_phase1, 'duration': dur})
+                self._queue2.append(dur)
+                self._p1.append((self._file_pred, t_phase1))
+                timing_stats.record(timing_stats.transcribe_key(cfg), dur, t_phase1)
                 self.transcribed_n += 1
                 gpu_fail_streak = 0
-                print(f"✅ [{i}/{total_files}] {fname}: транскрибация {fmt_duration(t_phase1)}, "
+                print(f"✅ [{i}/{total_files}] {fname}: транскрибация {fmt_duration(t_phase1)} "
+                      f"(аудио {fmt_duration(dur)}, прогноз был {fmt_duration(self._file_pred)}), "
                       f"{len(transcript_text)} симв.")
             except Exception as e:
                 if "❌" not in str(e):  # у ошибок транскрибации traceback уже в логе
@@ -549,6 +633,7 @@ class Job:
                             os.remove(_p)
                     except Exception as cleanup_err:
                         print(f"⚠️ Не удалось удалить временный файл: {cleanup_err}")
+                self._file_start = None
                 self.phase_done += 1
 
         # === СМЕНА МОДЕЛИ НА GPU: выгружаем WhisperX, освобождаем VRAM под Qwen ===
@@ -559,12 +644,15 @@ class Job:
 
         # ============ ФАЗА 2: КОРРЕКЦИЯ + АНАЛИЗ (GPU = только Qwen / облако) ============
         phase2_start = self.clock()
+        self._queue2 = [it['duration'] for it in transcribed]
         self._start_phase(2, "Анализ", len(transcribed))
         for j, item in enumerate(transcribed, 1):
             uploaded_file = item['uploaded_file']
             fname = uploaded_file.name
             transcript_text = item['transcript']
             file_start = self.clock()
+            dur = item['duration']
+            self._file_start, self._file_pred = file_start, self._a_rate.predict(dur)
             reset_file_cost()  # копим стоимость LLM за файл
             stage = "Коррекция текста"
             try:
@@ -623,8 +711,10 @@ class Job:
                     'elapsed': item['t_phase1'] + t_phase2,
                 })
                 self.analysed_n += 1
-                print(f"✅ [{j}/{self.phase_total}] {fname}: анализ {fmt_duration(t_phase2)}, "
-                      f"{file_cost:.2f} {COST_CURRENCY}")
+                self._p2.append((self._file_pred, t_phase2))
+                timing_stats.record(timing_stats.analyze_key(cfg), dur, t_phase2)
+                print(f"✅ [{j}/{self.phase_total}] {fname}: анализ {fmt_duration(t_phase2)} "
+                      f"(прогноз был {fmt_duration(self._file_pred)}), {file_cost:.2f} {COST_CURRENCY}")
             except LLMCancelled:
                 raise Cancelled()
             except Exception as e:
@@ -635,6 +725,7 @@ class Job:
                 # Деньги за вызовы, сделанные до ошибки/остановки, тоже потрачены — учитываем
                 self.cost_total += get_file_cost()
                 reset_file_cost()
+                self._file_start = None
                 self.phase_done += 1
 
         phase2_time = self.clock() - phase2_start
@@ -644,22 +735,26 @@ class Job:
               f"анализ {fmt_duration(phase2_time)}), стоимость ИИ {self.cost_total:.2f} {COST_CURRENCY} =====")
 
 
-_job = None
-_job_lock = threading.Lock()
+# Реестр прогона — в отдельном «модуле» без файла: Streamlit при изменении кода
+# перезагружает pipeline.py, и обычная глобальная переменная обнулилась бы, а фоновый
+# поток остался бы без хозяина (и следующий старт запустил бы второй прогон на GPU).
+_REG = sys.modules.setdefault("_okk_job_registry", types.ModuleType("_okk_job_registry"))
+if not hasattr(_REG, "lock"):
+    _REG.lock = threading.Lock()
+    _REG.job = None
 
 
 def get_job():
     """Текущий (или последний) прогон процесса — переживает перезагрузку страницы."""
-    return _job
+    return _REG.job
 
 
 def start_job(files, cfg):
     """Запускает новый прогон. Если предыдущий ещё идёт — возвращает его (второй
     параллельный прогон на одной видеокарте только уронил бы оба)."""
-    global _job
-    with _job_lock:
-        if _job is not None and _job.active:
-            return _job
-        _job = Job(files, cfg)
-        _job._thread.start()
-        return _job
+    with _REG.lock:
+        if _REG.job is not None and _REG.job.active:
+            return _REG.job
+        _REG.job = Job(files, cfg)
+        _REG.job._thread.start()
+        return _REG.job

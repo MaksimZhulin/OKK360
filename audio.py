@@ -390,6 +390,51 @@ def is_cuda_error(err):
     return any(m in text for m in _CUDA_ERROR_MARKERS)
 
 
+def audio_duration(data, name=""):
+    """Длительность аудио в секундах по байтам файла (для оценки времени обработки).
+    mp3/wav читает soundfile — мгновенно, без декодирования; остальное (m4a) — ffprobe
+    по временному файлу. Если не вышло — грубо по размеру (≈128 кбит/с), и это видно
+    по второму значению: (секунды, точно ли)."""
+    import io
+    try:
+        import soundfile as sf
+        return sf.info(io.BytesIO(data)).duration, True
+    except Exception:
+        pass
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        import subprocess
+        import tempfile
+        ext = os.path.splitext(name)[1] or ".m4a"
+        fd, tmp = tempfile.mkstemp(suffix=ext)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            r = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration",
+                                "-of", "default=nw=1:nk=1", tmp],
+                               capture_output=True, text=True, timeout=30)
+            return float(r.stdout.strip()), True
+        except Exception:
+            pass
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return len(data) / 16000.0, False
+
+
+def warmup_whisperx(hf_token, model_name="large-v3"):
+    """Загружает модели WhisperX (распознавание, выравнивание, диаризация) заранее —
+    отдельным шагом, чтобы время загрузки не размазывалось по первому файлу и
+    мерилось само по себе. Если модели уже в памяти — почти мгновенно."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "float16" if device == "cuda" else "int8"
+    load_whisperx_model(model_name, device, compute_type)
+    load_align_model("ru", device)
+    load_diarize_model(hf_token, device)
+
+
 def transcribe_with_whisperx_diarization(audio_path, hf_token, model_name="large-v3", min_speakers=2, max_speakers=2):
     """Транскрибация + диаризация одного файла. Возвращает размеченный текст или
     строку «❌ ОШИБКА WhisperX: ...» (полный traceback уходит в лог через print).
