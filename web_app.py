@@ -16,7 +16,7 @@ from googleapiclient.discovery import build
 from config import SPREADSHEET_ID, CREDENTIALS_FILE, SHEET_NAME, SHEET_TITLE
 import timing_stats
 from audio import WHISPERX_AVAILABLE, audio_duration
-from llm_analysis import COST_CURRENCY
+from llm_analysis import COST_CURRENCY, api_key_problem
 # Сама обработка (транскрибация, анализ, пауза/стоп) — в pipeline.py, в фоновом потоке
 from pipeline import fmt_duration, start_job, get_job, TEMP_DIR
 # Критерии для детального просмотра и подсчёта баллов
@@ -129,7 +129,10 @@ with st.sidebar:
             ],
             index=0
         )
-        deepseek_key = st.text_input("🔑 API ключ (для анализа)", type="password", help="Введите API ключ для DeepSeek/Gemini")
+        deepseek_key = st.text_input("🔑 API ключ (для анализа)", type="password",
+                                     help="Ключ AgentPlatform: Доступ к моделям → Ключи")
+        if deepseek_key and api_key_problem(deepseek_key):
+            st.warning(api_key_problem(deepseek_key))
     transcription_method = st.radio(
         "🎤 Метод транскрибации",
         ["WhisperX + диаризация (локально)", "Yandex SpeechKit (API)"],

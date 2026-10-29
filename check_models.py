@@ -15,6 +15,7 @@ import getpass
 from openai import OpenAI
 
 from config import LLM_BASE_URL
+from llm_analysis import api_key_problem
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -43,6 +44,10 @@ def main():
     # Что реально получено — без раскрытия ключа: длина и края
     print(f"Получен ключ: {len(key)} символов, {key[:4]}…{key[-4:]}"
           + (f" (убрано невидимых символов: {raw_len - len(key)})" if raw_len != len(key) else ""))
+    problem = api_key_problem(key)
+    if problem:
+        print(f"❌ {problem}")
+        return
     client = OpenAI(api_key=key, base_url=LLM_BASE_URL, timeout=60, max_retries=0)
 
     print(f"\nШлюз: {LLM_BASE_URL}")

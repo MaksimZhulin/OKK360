@@ -294,12 +294,32 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
         return strip_think(response.choices[0].message.content or "")
 
 
+def api_key_problem(api_key):
+    """Проверка ключа до запроса: ключи API — только латиница, цифры и -_.
+    Русская буква (набор в русской раскладке) или невидимый символ при вставке иначе
+    дают невнятную UnicodeEncodeError. Возвращает описание проблемы или None."""
+    if not api_key or not api_key.strip():
+        return "API-ключ не введён."
+    bad = [(i + 1, ch) for i, ch in enumerate(api_key) if not (ch.isascii() and ch.isprintable())]
+    if bad:
+        shown = ", ".join(f"№{pos} {repr(ch)}" for pos, ch in bad[:5])
+        return (f"В API-ключе есть недопустимые символы ({shown}) — ключ должен состоять только "
+                "из латиницы и цифр. Скорее всего, он набран в русской раскладке или вставился "
+                "с лишним текстом. Скопируйте ключ из кабинета заново.")
+    if api_key != api_key.strip():
+        return "В начале или конце API-ключа есть пробелы — скопируйте ключ без них."
+    return None
+
+
 def check_model_access(model, api_key):
     """Пробный крошечный запрос к облачной модели ДО начала прогона: неверный ключ,
     закрытая для ключа модель или лежащий шлюз обнаруживаются за секунды, а не после
     часа транскрибации (когда все расшифровки пропадают). None — всё в порядке,
     иначе — понятное описание проблемы."""
     from openai import AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError
+    problem = api_key_problem(api_key)
+    if problem:
+        return problem
     try:
         llm_chat([{"role": "user", "content": "Ответь одним словом: ок"}], model, api_key,
                  temperature=0, max_tokens=16, label=f"проверка доступа к {model}")
