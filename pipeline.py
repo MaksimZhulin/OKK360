@@ -19,7 +19,7 @@ from auto_learning import save_to_knowledge_base, calculate_confidence, find_sim
 from audio import (
     WHISPERX_AVAILABLE, preprocess_audio, pad_audio_simple_silence,
     transcribe_with_yandex, transcribe_with_whisperx_diarization,
-    unload_whisperx_from_vram, is_cuda_error, audio_duration, warmup_whisperx,
+    unload_whisperx_from_vram, is_cuda_error, audio_duration, warmup_whisperx, log_vram,
 )
 from llm_analysis import (
     COST_CURRENCY, llm_chat, LLMCancelled, smart_text_correction, correct_speaker_roles,
@@ -571,11 +571,13 @@ class Job:
         if n1 and use_whisperx and cfg["hf_token"] and WHISPERX_AVAILABLE:
             self.checkpoint()
             self.stage, self.stage_file = "⏳ Загрузка моделей распознавания (WhisperX)...", ""
+            log_vram("перед загрузкой моделей")
             t0 = self.clock()
             try:
                 warmup_whisperx(cfg["hf_token"])
                 t_load = self.clock() - t0
                 print(f"⏱️ Модели WhisperX готовы за {fmt_duration(t_load)}")
+                log_vram("после загрузки моделей")
                 if t_load > 3:  # модели действительно грузились, а не были уже в памяти
                     timing_stats.record("load|whisperx", 1.0, t_load)
             except Exception as e:
@@ -665,12 +667,15 @@ class Job:
                         print(f"⚠️ Не удалось удалить временный файл: {cleanup_err}")
                 self._file_start = None
                 self.phase_done += 1
+                if use_whisperx:
+                    log_vram(f"после файла {i}/{n1}")
 
         # === СМЕНА МОДЕЛИ НА GPU: выгружаем WhisperX, освобождаем VRAM под Qwen ===
         self.checkpoint()
         if n1:
             self.stage, self.stage_file = "🔄 Освобождаю видеопамять перед анализом...", ""
             unload_whisperx_from_vram()
+            log_vram("после выгрузки WhisperX")
         phase1_time = self.clock() - self.started
 
         # ============ ФАЗА 2: КОРРЕКЦИЯ + АНАЛИЗ (GPU = только Qwen / облако) ============

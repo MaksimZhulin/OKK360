@@ -297,6 +297,22 @@ def free_gpu_memory():
         print(f"⚠️ Очистка VRAM: {e}")
 
 
+def log_vram(where):
+    """Строка в лог: сколько видеопамяти занято на всей карте и сколько из неё держит
+    PyTorch этого процесса. По ней видно, где память копится между файлами/прогонами
+    (CTranslate2 — сам Whisper — PyTorch не виден: он = «занято» минус PyTorch минус прочие)."""
+    try:
+        if not torch.cuda.is_available():
+            return
+        free, total = torch.cuda.mem_get_info()
+        gb = 1024 ** 3
+        print(f"🧮 VRAM {where}: занято {(total - free) / gb:.1f} из {total / gb:.1f} ГБ · "
+              f"PyTorch: выделено {torch.cuda.memory_allocated() / gb:.1f}, "
+              f"в кэше {torch.cuda.memory_reserved() / gb:.1f} ГБ")
+    except Exception as e:
+        print(f"⚠️ Замер VRAM: {e}")
+
+
 def unload_whisperx_from_vram():
     """Выгружает модели WhisperX (основную + выравнивание) из VRAM.
     Модели держатся в кэше (_model_cache) и живут в видеопамяти между файлами —
@@ -448,23 +464,30 @@ def transcribe_with_whisperx_diarization(audio_path, hf_token, model_name="large
     print(f"🔧 Устройство: {device} | 📦 Модель: {model_name}")
     last_err = None
     for attempt, batch_size in enumerate(batch_sizes, 1):
+        text, retry = None, False
         try:
-            return _whisperx_pipeline(audio_path, hf_token, model_name, device, compute_type,
+            text = _whisperx_pipeline(audio_path, hf_token, model_name, device, compute_type,
                                       batch_size, min_speakers, max_speakers)
         except Exception as e:
-            last_err = e
+            # Храним только ТЕКСТ ошибки: само исключение держит traceback, а в его кадрах —
+            # модель и тензоры на GPU. Пока оно живо, видеопамять не освобождается, и
+            # перезагрузка модели клала в VRAM вторую копию → снова нехватка памяти.
+            last_err = str(e)
             print(f"❌ WhisperX, попытка {attempt}/{len(batch_sizes)} (batch_size={batch_size}): {e}")
             print(traceback.format_exc())
-            if not is_cuda_error(e) or attempt == len(batch_sizes):
-                break
-            # После сбоя CUDA модель может остаться в нерабочем состоянии
-            # (дальше «invalid device ordinal» на каждом файле) — перезагружаем всё.
-            print(f"🔁 Ошибка GPU — перезагружаю модели и повторяю с batch_size={batch_sizes[attempt]}")
-            unload_whisperx_from_vram()
-        finally:
-            # Чистим VRAM после КАЖДОГО файла: кэш PyTorch (выравнивание, pyannote)
-            # иначе копится, и CTranslate2 (сам Whisper) упирается в нехватку памяти.
-            free_gpu_memory()
+            retry = is_cuda_error(e) and attempt < len(batch_sizes)
+        # Здесь исключение уже отпущено. Чистим VRAM после КАЖДОГО файла: кэш PyTorch
+        # (выравнивание, pyannote) иначе копится, и CTranslate2 упирается в нехватку памяти.
+        free_gpu_memory()
+        if text is not None:
+            return text
+        if not retry:
+            break
+        # После сбоя CUDA модель может остаться в нерабочем состоянии
+        # (дальше «invalid device ordinal» на каждом файле) — перезагружаем всё.
+        print(f"🔁 Ошибка GPU — перезагружаю модели и повторяю с batch_size={batch_sizes[attempt]}")
+        unload_whisperx_from_vram()
+        log_vram("после выгрузки моделей")
     return f"❌ ОШИБКА WhisperX: {last_err}"
 
 
