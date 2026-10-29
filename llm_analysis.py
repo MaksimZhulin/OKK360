@@ -6,6 +6,15 @@
 import re
 import threading
 
+# openai/httpx (а с ними pydantic) импортируем при старте приложения, в основном потоке.
+# Раньше импорт был внутри функций — впервые в фоновом потоке прогона, параллельно с потоком
+# Streamlit, который обходит sys.modules; прогон падал с «No module named 'typing_inspection'»
+# посреди импорта pydantic.
+import httpx
+from openai import (OpenAI, APITimeoutError, APIConnectionError, RateLimitError,
+                    InternalServerError, AuthenticationError, PermissionDeniedError,
+                    NotFoundError, BadRequestError)
+
 from config import LLM_BASE_URL
 
 # Показывать сырой ответ LLM в консоли/логе (для проверки, отдаёт ли tokengate готовую
@@ -265,9 +274,6 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
         print(f"⏱️ [{label}] {time.time() - t0:.0f} с (локально, {model})")
         return text
 
-    import httpx
-    from openai import (OpenAI, APITimeoutError, APIConnectionError,
-                        RateLimitError, InternalServerError)
     # httpx.HTTPError — обрыв соединения посреди потока ответа
     retryable = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError,
                  httpx.HTTPError)
@@ -338,7 +344,6 @@ def check_model_access(model, api_key):
     закрытая для ключа модель или лежащий шлюз обнаруживаются за секунды, а не после
     часа транскрибации (когда все расшифровки пропадают). None — всё в порядке,
     иначе — понятное описание проблемы."""
-    from openai import AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError
     problem = api_key_problem(api_key)
     if problem:
         return problem
