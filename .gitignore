@@ -510,3 +510,6 @@ transcripts/
 *.log
 *.db
 *.sqlite
+# Итоги прогонов (персональные данные клиентов)
+results/
+benchmark/

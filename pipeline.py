@@ -283,6 +283,7 @@ def normalize_analysis(analysis_result):
 # операциями (checkpoint) — начатая операция всегда доводится до конца.
 
 TEMP_DIR = os.path.join("temp", "processing")  # временные аудио прогона
+RESULTS_DIR = "results"  # итоги каждого прогона (JSON) — для сравнения и восстановления
 
 
 class Cancelled(BaseException):
@@ -491,6 +492,28 @@ class Job:
                 self.outcome = "failed"
             finally:
                 self.finished = time.time()
+                if self.outcome != "cancelled":
+                    self._save_results()
+
+    def _save_results(self):
+        """Итоги прогона — в results/<имя лога>.json (разборы с расшифровками, время,
+        стоимость, настройки БЕЗ ключей). Раньше результаты жили только в памяти
+        страницы и пропадали со следующим прогоном — сравнивать модели было не на чем.
+        В файлах — персональные данные клиентов: папка results/ не попадает в git."""
+        try:
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            safe_cfg = {k: v for k, v in self.cfg.items()
+                        if k in ("local_mode", "analysis_model", "transcription_method", "preprocess")}
+            name = os.path.splitext(os.path.basename(self.log.path))[0]
+            path = os.path.join(RESULTS_DIR, f"{name}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"cfg": safe_cfg, "outcome": self.outcome, "elapsed": self.elapsed(),
+                           "phase_times": self.phase_times, "cost_total": self.cost_total,
+                           "results": self.results}, f, ensure_ascii=False, indent=1, default=str)
+            self.results_path = path
+        except Exception as e:
+            self.results_path = None
+            print(f"⚠️ Не удалось сохранить итоги прогона: {e}")
 
     def _release_gpu(self):
         try:
@@ -673,7 +696,7 @@ class Job:
 
                 stage = "Анализ"
                 self._stage(j, fname, "🧠 Анализ звонка")
-                similar_calls = find_similar_calls(transcript_text, top_k=3)
+                similar_calls = find_similar_calls(transcript_text, top_k=3, exclude_filename=fname)
                 examples_text = ""
                 if similar_calls:
                     examples_text = "\n\nПРИМЕРЫ ПОХОЖИХ ЗВОНКОВ ИЗ БАЗЫ:\n"

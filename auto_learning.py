@@ -149,8 +149,10 @@ def save_to_knowledge_base(transcript, analysis, confidence, auto_save=True, fil
 
 
 
-def find_similar_calls(transcript, top_k=3):
-    """Ищет похожие звонки в базе"""
+def find_similar_calls(transcript, top_k=3, exclude_filename=None):
+    """Ищет похожие звонки в базе. exclude_filename — сам анализируемый звонок: если он
+    уже есть в базе с прошлого прогона, иначе модель получила бы в примерах готовый
+    ответ на этот же звонок (и просто повторила бы его — сравнение моделей теряет смысл)."""
     if not os.path.exists(DATABASE_FILE):
         return []
     
@@ -165,6 +167,8 @@ def find_similar_calls(transcript, top_k=3):
     scored_calls = []
     
     for call in database["calls"]:
+        if exclude_filename and call.get("filename") == exclude_filename:
+            continue
         score = 0
         call_transcript = call.get("transcript", "").lower()
         
