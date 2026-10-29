@@ -205,28 +205,29 @@ def show_time_estimate(durations, approx_n, cfg):
     est = timing_stats.estimate(durations, cfg)
     finish = datetime.now() + timedelta(seconds=est["total"])
     day = "" if finish.date() == datetime.now().date() else f" {finish:%d.%m}"
-    st.markdown(f"#### ⏱️ Обработка займёт ≈ {fmt_duration(est['total'])} "
-                f"(окончание ≈ {finish:%H:%M}{day})")
     whisperx = "WhisperX" in cfg["transcription_method"]
     parts = []
     if est["load"]:
-        parts.append(f"загрузка моделей ≈ {fmt_duration(est['load'])}")
-    parts.append(f"транскрибация ({'WhisperX' if whisperx else 'Yandex SpeechKit'}) "
-                 f"≈ {fmt_duration(est['transcribe'])}")
-    parts.append(f"анализ ({cfg['analysis_model']}, {'локально' if cfg['local_mode'] else 'облако'}) "
-                 f"≈ {fmt_duration(est['analyze'])}")
-    st.caption(f"Аудио: {len(durations)} файлов, всего {fmt_duration(sum(durations))} · " + " · ".join(parts))
-    missing = [name for name, n in (("транскрибация", est["n_transcribe"]),
-                                    ("анализ", est["n_analyze"])) if not n]
+        parts.append(f"загрузка {fmt_duration(est['load'])}")
+    parts.append(f"транскрибация {fmt_duration(est['transcribe'])}")
+    parts.append(f"анализ {fmt_duration(est['analyze'])}")
+    missing = [name for name, n in (("транскрибации", est["n_transcribe"]),
+                                    ("анализа", est["n_analyze"])) if not n]
+    # Подробности — во всплывающей подсказке, чтобы блок оставался в две строки
+    details = [f"Транскрибация: {'WhisperX' if whisperx else 'Yandex SpeechKit'}. "
+               f"Анализ: {cfg['analysis_model']} ({'локально' if cfg['local_mode'] else 'облако'}).",
+               f"Замеров на этом компьютере с этими настройками: транскрибация — {est['n_transcribe']}, "
+               f"анализ — {est['n_analyze']}. Во время прогона оценка уточняется по фактической скорости."]
     if missing:
-        st.caption(f"⚠️ Для этих настроек ещё нет замеров ({', '.join(missing)}) — оценка по стартовым "
-                   "значениям, приблизительная. Станет точной после первого прогона с ними.")
-    else:
-        st.caption(f"Оценка по замерам на этом компьютере с этими настройками: транскрибация — "
-                   f"{est['n_transcribe']} файлов, анализ — {est['n_analyze']} файлов. "
-                   "Во время прогона уточняется по фактической скорости.")
+        details.append(f"Для {' и '.join(missing)} замеров ещё нет — взяты стартовые значения; "
+                       "после первого прогона с этими настройками оценка станет точной.")
     if approx_n:
-        st.caption(f"У {approx_n} файлов длительность определена по размеру — для них оценка грубее.")
+        details.append(f"У {approx_n} файлов длительность определена по размеру — для них оценка грубее.")
+    with st.container(border=True):
+        st.markdown(f"⏱️ **Обработка ≈ {fmt_duration(est['total'])}** · окончание ≈ {finish:%H:%M}{day} · "
+                    f"{len(durations)} файлов, {fmt_duration(sum(durations))} аудио")
+        st.caption(" · ".join(parts) + (" · ⚠️ приблизительно" if missing or approx_n else ""),
+                   help="\n\n".join(details))
 
 
 # =============== ШАГ 1: ЗАГРУЗКА ===============
@@ -234,6 +235,7 @@ if st.session_state.current_step == 1:
     st.header("1. 📁 Загрузите аудиофайлы")
     if st.session_state.get("flash"):
         st.info(st.session_state.pop("flash"))
+    estimate_box = st.container()  # прогноз времени — над загрузчиком, заполняется ниже
     uploaded_files = st.file_uploader("Перетащите файлы", type=['mp3', 'wav', 'm4a'], accept_multiple_files=True, label_visibility="collapsed")
 
     if uploaded_files:
@@ -251,7 +253,8 @@ if st.session_state.current_step == 1:
         with st.expander(f"📋 Загружено: {len(uploaded_files)}", expanded=True):
             for i, (file, d) in enumerate(zip(uploaded_files, durations)):
                 st.write(f"{i+1}. {file.name} — {fmt_duration(d)} ({file.size / 1024:.1f} KB)")
-        show_time_estimate(durations, approx_n, current_run_cfg())
+        with estimate_box:
+            show_time_estimate(durations, approx_n, current_run_cfg())
 
         if st.button("🚀 Начать обработку", type="primary"):
             st.session_state.current_step = 2
