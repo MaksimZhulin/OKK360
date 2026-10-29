@@ -150,10 +150,11 @@ def unload_ollama_model(model):
 COST_CURRENCY = "₽"
 # Тариф в ₽ за 1000 токенов (вход/выход). tokengate даёт цену за 1М — делим на 1000.
 LLM_PRICES = {
-    "google/gemini-2.5-flash": {"in": 0.0324, "out": 0.27},   # РЕАЛЬНЫЙ тариф: 32.4 / 270 ₽ за 1М
-    "deepseek/deepseek-chat":  {"in": 0.05, "out": 0.20},     # примерно — уточни у tokengate
-    "openai/gpt-4o":           {"in": 0.55, "out": 2.20},     # примерно — уточни у tokengate
-    "mistralai/mistral-nemo":  {"in": 0.02, "out": 0.05},     # примерно — уточни у tokengate
+    # тарифы AgentPlatform (каталог моделей, октябрь 2026): ₽ за 1М / 1000
+    "gemini-2.5-flash":      {"in": 0.0324, "out": 0.27},    # 32.4 / 270 ₽ за 1М
+    "gemini-2.5-flash-lite": {"in": 0.0108, "out": 0.0432},  # 10.8 / 43.2 ₽ за 1М
+    "deepseek-chat":         {"in": 0.03456, "out": 0.09612},  # 34.56 / 96.12 ₽ за 1М
+    "gpt-4o":                {"in": 0.27, "out": 1.08},      # 270 / 1080 ₽ за 1М
 }
 LLM_PRICE_DEFAULT = {"in": 0.05, "out": 0.20}
 

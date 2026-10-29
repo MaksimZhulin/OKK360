@@ -120,10 +120,11 @@ with st.sidebar:
         analysis_model = st.selectbox(
             "🧠 Модель анализа",
             [
-                "google/gemini-2.5-flash", 
-                "deepseek/deepseek-chat", 
-                "openai/gpt-4o", 
-                "mistralai/mistral-nemo"
+                # названия — как в каталоге AgentPlatform (без префикса вендора)
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "deepseek-chat",
+                "gpt-4o",
             ],
             index=0
         )
