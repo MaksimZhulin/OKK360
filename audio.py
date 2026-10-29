@@ -24,7 +24,8 @@ if shutil.which("ffmpeg") is None:
     else:
         print("⚠️ ffmpeg не найден — локальная транскрибация (WhisperX) работать не будет")
 
-import streamlit as st
+import threading
+import functools
 import torch
 
 try:
@@ -116,6 +117,9 @@ def filter_duplicate_lines(transcript_text):
             
     return '\n'.join(filtered_lines)
 
+YANDEX_MAX_WAIT = 30 * 60  # сек: дольше ждать распознавание одного файла нет смысла
+
+
 def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_secret_access_key, bucket_name):
     """Асинхронная транскрибация через Yandex SpeechKit v2 с диаризацией."""
     import boto3
@@ -165,19 +169,27 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
     header = {'Authorization': f'Api-Key {yandex_api_key}'}
     
     try:
-        req = requests.post(POST, headers=header, json=body)
+        req = requests.post(POST, headers=header, json=body, timeout=60)
         req.raise_for_status()
         data = req.json()
         task_id = data.get('id')
     except Exception as e:
         return f"❌ Ошибка SpeechKit API: {req.text if 'req' in locals() else str(e)}"
 
+    # Ждём результат, но не вечно: раньше цикл без таймаутов мог повесить весь прогон
+    deadline = time.time() + YANDEX_MAX_WAIT
+    GET = f"https://operation.api.cloud.yandex.net/operations/{task_id}"
     while True:
         time.sleep(5)
-        GET = f"https://operation.api.cloud.yandex.net/operations/{task_id}"
-        req = requests.get(GET, headers=header)
-        req.raise_for_status()
-        data = req.json()
+        if time.time() > deadline:
+            return f"❌ Ошибка: Яндекс не вернул результат за {YANDEX_MAX_WAIT // 60} мин"
+        try:
+            req = requests.get(GET, headers=header, timeout=60)
+            req.raise_for_status()
+            data = req.json()
+        except Exception as e:
+            print(f"⚠️ [Яндекс] проверка статуса не удалась, повторяю: {e}")
+            continue
 
         if data.get('done'):
             break
@@ -218,7 +230,29 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
     else:
         return f"❌ Ошибка: Яндекс не вернул текст. Ответ: {data}"
 
-@st.cache_resource(show_spinner="Загрузка WhisperX в память...")
+def _model_cache(func):
+    """Кэш загруженных моделей на уровне процесса (вместо st.cache_resource):
+    обработка идёт в фоновом потоке, где Streamlit-кэш недоступен. Ключ — аргументы
+    вызова; .clear() сбрасывает ссылки, чтобы free_gpu_memory() освободил VRAM."""
+    cache = {}
+    lock = threading.Lock()
+
+    @functools.wraps(func)
+    def wrapper(*args):
+        with lock:
+            if args not in cache:
+                cache[args] = func(*args)
+            return cache[args]
+
+    def clear():
+        with lock:
+            cache.clear()
+
+    wrapper.clear = clear
+    return wrapper
+
+
+@_model_cache
 def load_whisperx_model(model_name, device, compute_type):
     """Загружает и кеширует основную модель WhisperX.
     initial_prompt (доменный словарь) биасит распознавание к нашим терминам."""
@@ -232,14 +266,14 @@ def load_whisperx_model(model_name, device, compute_type):
     )
     return model
 
-@st.cache_resource(show_spinner="Загрузка модели выравнивания...")
+@_model_cache
 def load_align_model(language_code, device):
     """Загружает и кеширует модель выравнивания (alignment)"""
     print(f"📍 [Cache] Загрузка модели выравнивания ({language_code})...")
     model_a, metadata = whisperx.load_align_model(language_code=language_code, device=device)
     return model_a, metadata
 
-@st.cache_resource(show_spinner="Загрузка модели диаризации...")
+@_model_cache
 def load_diarize_model(hf_token, device):
     """Загружает и кеширует пайплайн диаризации pyannote.
     Раньше он создавался заново на КАЖДЫЙ файл: каждая копия занимала VRAM, и на пачке
@@ -265,7 +299,7 @@ def free_gpu_memory():
 
 def unload_whisperx_from_vram():
     """Выгружает модели WhisperX (основную + выравнивание) из VRAM.
-    Модели держатся в @st.cache_resource и живут в видеопамяти между файлами —
+    Модели держатся в кэше (_model_cache) и живут в видеопамяти между файлами —
     .clear() убирает ссылки, дальше free_gpu_memory() реально освобождает VRAM.
     Нужно перед запуском локальной Qwen: на 12 ГБ обе модели одновременно не влезают."""
     try:

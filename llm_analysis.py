@@ -4,7 +4,7 @@
 Вынесено из web_app.py.
 """
 import re
-import streamlit as st
+import threading
 
 from config import LLM_BASE_URL
 
@@ -180,10 +180,30 @@ def _extract_real_cost(response):
     return None
 
 
+# Стоимость вызовов по текущему файлу. Обработка идёт в фоновом потоке (не в Streamlit),
+# поэтому копим не в session_state, а здесь; прогон в процессе всегда один.
+_file_cost = 0.0
+_cost_lock = threading.Lock()
+
+
+def reset_file_cost():
+    """Обнуляет счётчик перед новым файлом."""
+    global _file_cost
+    with _cost_lock:
+        _file_cost = 0.0
+
+
+def get_file_cost():
+    """Сколько уже потрачено на текущий файл (₽)."""
+    with _cost_lock:
+        return _file_cost
+
+
 def add_llm_cost(model, response):
-    """Считает стоимость вызова и копит её в session_state для текущего файла.
+    """Считает стоимость вызова и копит её в счётчике текущего файла.
     Приоритет: готовая стоимость из ответа tokengate (если есть) -> иначе по токенам.
     Вызывать после каждого запроса к LLM."""
+    global _file_cost
     try:
         usage = getattr(response, "usage", None)
         # Кэшированные входные токены (если провайдер отдаёт) — из-за них реальная
@@ -205,8 +225,9 @@ def add_llm_cost(model, response):
         else:
             return
 
-        prev = st.session_state.get("_file_llm_cost", 0.0)
-        st.session_state["_file_llm_cost"] = prev + cost
+        with _cost_lock:
+            prev = _file_cost
+            _file_cost = prev + cost
 
         # Диагностика: по одной читаемой строке на вызов — видно источник цены,
         # токены (в т.ч. кэш) и накопленную сумму по файлу. SHOW_RAW_LLM=False отключает.
@@ -223,10 +244,17 @@ CLOUD_TIMEOUT = 180            # сек на один запрос
 CLOUD_RETRY_PAUSES = (10, 30)  # паузы перед 2-й и 3-й попыткой
 
 
-def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_tokens=2500, label=""):
+class LLMCancelled(Exception):
+    """Прогон остановлен пользователем — повторные попытки не делаем."""
+
+
+def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_tokens=2500,
+             label="", cancel=None):
     """Единая точка вызова LLM: локально — нативный Ollama, в облаке — OpenAI-совместимый
     прокси с таймаутом и повторами при сетевых сбоях / перегрузке шлюза.
-    Стоимость облачного вызова копится в session_state (add_llm_cost).
+    Стоимость облачного вызова копится в счётчике файла (add_llm_cost).
+    cancel — threading.Event «Стоп»: прерывает паузу между попытками (сам запрос
+    дорабатывает до ответа/таймаута — оборвать его на полпути нельзя).
     Возвращает текст ответа без <think>; при исчерпании попыток пробрасывает исключение."""
     import time
     t0 = time.time()
@@ -254,14 +282,18 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
                 raise
             pause = CLOUD_RETRY_PAUSES[attempt - 1]
             print(f"   повтор через {pause} с")
-            time.sleep(pause)
+            if cancel is not None:
+                if cancel.wait(pause):
+                    raise LLMCancelled("остановлено пользователем")
+            else:
+                time.sleep(pause)
             continue
         add_llm_cost(model, response)
         print(f"⏱️ [{label}] {time.time() - t0:.0f} с ({model}, попытка {attempt})")
         return strip_think(response.choices[0].message.content or "")
 
 
-def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode=False, label=""):
+def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode=False, label="", cancel=None):
     """Использует LLM для умной коррекции слов по контексту без изменения сути"""
     prompt = f"""Исправь ошибки транскрибации в тексте звонка.
     Особенно обрати внимание на названия компаний и термины.
@@ -302,7 +334,7 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
     try:
         corrected_text = llm_chat(messages, analysis_model, deepseek_key, local_mode,
                                   temperature=0.1, max_tokens=4000,
-                                  label=f"коррекция текста: {label}")
+                                  label=f"коррекция текста: {label}", cancel=cancel)
 
         if "Менеджер:" in corrected_text or "Клиент:" in corrected_text:
             return corrected_text
@@ -314,7 +346,7 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
         print(f"⚠️ [коррекция текста: {label}] не удалась, оставляю исходный текст: {e}")
         return transcript_text
 
-def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode=False, label=""):
+def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode=False, label="", cancel=None):
     """Использует LLM для глубокой коррекции ролей спикеров в транскрипции"""
     prompt = f"""Перед тобой транскрипция телефонного звонка в компанию "СтальМетУрал".
 Из-за технических особенностей записи нейросеть могла:
@@ -350,7 +382,7 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
     try:
         corrected_text = llm_chat(messages, analysis_model, deepseek_key, local_mode,
                                   temperature=0.2, max_tokens=4000,
-                                  label=f"коррекция ролей: {label}")
+                                  label=f"коррекция ролей: {label}", cancel=cancel)
 
         if "👨‍💼 Менеджер:" in corrected_text and "👤 Клиент:" in corrected_text:
             return corrected_text
