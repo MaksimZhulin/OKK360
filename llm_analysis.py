@@ -265,17 +265,19 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
         print(f"⏱️ [{label}] {time.time() - t0:.0f} с (локально, {model})")
         return text
 
+    import httpx
     from openai import (OpenAI, APITimeoutError, APIConnectionError,
                         RateLimitError, InternalServerError)
-    retryable = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
+    # httpx.HTTPError — обрыв соединения посреди потока ответа
+    retryable = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError,
+                 httpx.HTTPError)
     client = OpenAI(api_key=api_key, base_url=LLM_BASE_URL,
                     timeout=CLOUD_TIMEOUT, max_retries=0)
     attempts = len(CLOUD_RETRY_PAUSES) + 1
     for attempt in range(1, attempts + 1):
         t_try = time.time()
         try:
-            response = client.chat.completions.create(
-                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+            response = _stream_chat(client, model, messages, temperature, max_tokens)
         except retryable as e:
             print(f"⚠️ [{label}] попытка {attempt}/{attempts} не удалась через "
                   f"{time.time() - t_try:.0f} с: {type(e).__name__}: {e}")
@@ -291,7 +293,27 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
             continue
         add_llm_cost(model, response)
         print(f"⏱️ [{label}] {time.time() - t0:.0f} с ({model}, попытка {attempt})")
-        return strip_think(response.choices[0].message.content or "")
+        return strip_think(response.text)
+
+
+def _stream_chat(client, model, messages, temperature, max_tokens):
+    """Запрос с потоковым ответом. Шлюз AgentPlatform рвёт соединение, если ответ
+    не начал приходить ~50 с (так обрывались медленные модели вроде deepseek-chat на
+    длинных ответах коррекции). В потоке текст идёт частями — соединение не простаивает.
+    Возвращает объект с .text и .usage (для учёта стоимости)."""
+    import types
+    stream = client.chat.completions.create(
+        model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+        stream=True, stream_options={"include_usage": True})
+    parts, usage = [], None
+    for chunk in stream:
+        if chunk.choices:
+            delta = chunk.choices[0].delta
+            if delta is not None and delta.content:
+                parts.append(delta.content)
+        if getattr(chunk, "usage", None):
+            usage = chunk.usage
+    return types.SimpleNamespace(text="".join(parts), usage=usage)
 
 
 def api_key_problem(api_key):

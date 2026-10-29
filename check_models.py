@@ -75,5 +75,29 @@ def main():
             print(f"  ❌ {model:22} {type(e).__name__}: {msg[:160]}")
 
 
+    # Длинный ответ, как в коррекции текста (~1000+ токенов). Шлюз рвал соединение через
+    # ~50 с у медленных моделей — сравниваем обычный запрос и потоковый (как в приложении).
+    import time
+    from llm_analysis import _stream_chat
+    print("\nДлинный ответ (~1000 токенов): обычный запрос vs поток")
+    long_msg = [{"role": "user", "content": "Перечисли по-русски 60 видов металлопроката, "
+                                            "к каждому — одно предложение описания."}]
+    for model in ("deepseek/deepseek-chat", "google/gemini-2.5-flash"):
+        for mode in ("обычный", "поток"):
+            t = time.time()
+            try:
+                if mode == "поток":
+                    r = _stream_chat(client, model, long_msg, 0.3, 1500)
+                    n = getattr(r.usage, "completion_tokens", "?")
+                else:
+                    r = client.chat.completions.create(model=model, messages=long_msg,
+                                                       temperature=0.3, max_tokens=1500)
+                    n = r.usage.completion_tokens if r.usage else "?"
+                print(f"  ✅ {model:24} {mode:8} {time.time() - t:5.0f} с, ответ {n} токенов")
+            except Exception as e:
+                print(f"  ❌ {model:24} {mode:8} {time.time() - t:5.0f} с: {type(e).__name__}: "
+                      f"{str(e)[:100]}")
+
+
 if __name__ == "__main__":
     main()
