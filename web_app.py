@@ -304,10 +304,31 @@ if st.session_state.current_step == 1:
     if st.session_state.get("flash"):
         st.info(st.session_state.pop("flash"))
     estimate_box = st.container()  # прогноз времени — над загрузчиком, заполняется ниже
-    uploaded_files = st.file_uploader("Перетащите файлы", type=['mp3', 'wav', 'm4a'], accept_multiple_files=True, label_visibility="collapsed")
 
+    # Загрузчик — только «зона добавления». Выбранные файлы сразу переносим в свой список
+    # и сбрасываем виджет (новый key): иначе он рисует собственную сетку плашек, которая
+    # дублирует список ниже. Добавлять можно в несколько заходов, повторы отсекаются.
+    _up_n = st.session_state.get("uploader_n", 0)
+    new_files = st.file_uploader("Перетащите аудиофайлы сюда или нажмите, чтобы выбрать",
+                                 type=['mp3', 'wav', 'm4a'], accept_multiple_files=True,
+                                 key=f"uploader_{_up_n}", label_visibility="collapsed")
+    if new_files:
+        have = {(f.name, f.size) for f in st.session_state.uploaded_files}
+        added = []
+        for f in new_files:
+            if (f.name, f.size) not in have:
+                have.add((f.name, f.size))
+                added.append(f)
+        st.session_state.uploaded_files = list(st.session_state.uploaded_files) + added
+        if len(added) < len(new_files):
+            st.session_state.upload_note = f"Повторы пропущены: {len(new_files) - len(added)}"
+        st.session_state.uploader_n = _up_n + 1
+        st.rerun()
+    if st.session_state.get("upload_note"):
+        st.caption("ℹ️ " + st.session_state.pop("upload_note"))
+
+    uploaded_files = st.session_state.uploaded_files
     if uploaded_files:
-        st.session_state.uploaded_files = uploaded_files
         # Длительность аудио — основа прогноза времени (считаем один раз на файл)
         _dur_cache = st.session_state.setdefault("audio_durations", {})
         durations, approx_n = [], 0
@@ -318,9 +339,25 @@ if st.session_state.current_step == 1:
             d, exact = _dur_cache[key]
             durations.append(d)
             approx_n += not exact
-        with st.expander(f"📋 Загружено: {len(uploaded_files)}", expanded=True):
-            for i, (file, d) in enumerate(zip(uploaded_files, durations)):
-                st.write(f"{i+1}. {file.name} — {fmt_duration(d)} ({file.size / 1024:.1f} KB)")
+
+        def _remove_file(key):
+            st.session_state.uploaded_files = [f for f in st.session_state.uploaded_files
+                                               if (f.name, f.size) != key]
+
+        def _clear_files():
+            st.session_state.uploaded_files = []
+
+        # Свёрнут по умолчанию — при сотне файлов развёрнутый список растянул бы страницу.
+        # key — чтобы список не захлопывался, когда после удаления меняется счётчик в заголовке.
+        with st.expander(f"📋 Файлы: {len(uploaded_files)} · {fmt_duration(sum(durations))} аудио",
+                         expanded=False, key="files_list"):
+            for i, (f, d) in enumerate(zip(uploaded_files, durations), 1):
+                c_x, c_name = st.columns([1, 30], vertical_alignment="center")
+                c_x.button("✕", key=f"rm_{f.name}_{f.size}", on_click=_remove_file,
+                           args=((f.name, f.size),), type="tertiary", help="Убрать из списка")
+                _nm = f.name.replace("_", "\\_").replace("*", "\\*")  # имя — не разметка
+                c_name.markdown(f"{i}. {_nm} — {fmt_duration(d)} · {f.size / 1024 / 1024:.1f} МБ")
+            st.button("🗑️ Очистить список", key="files_clear", on_click=_clear_files, type="tertiary")
         with estimate_box:
             show_time_estimate(durations, approx_n, current_run_cfg())
 
