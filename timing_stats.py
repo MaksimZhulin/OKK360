@@ -87,6 +87,7 @@ class Rate:
             samples = [(float(d), float(s)) for d, s in data.get(key, []) if d >= 1 and s > 0]
         except (TypeError, ValueError):
             samples = []  # испорченный файл замеров — работаем на стартовых значениях
+        samples = _drop_outliers(samples, a0, b0)
         self.n = len(samples)
         if self.n >= MIN_FOR_FIT:
             self.a, self.b = _fit(samples, a0, b0)
@@ -102,6 +103,20 @@ class Rate:
     @property
     def measured(self):
         return self.n > 0
+
+
+OUTLIER_FACTOR = 3.0  # во сколько раз замер может отличаться от типичного
+
+
+def _drop_outliers(samples, a0, b0):
+    """Убирает замеры из сбойных прогонов: время, отличающееся от типичного (медианы
+    отношения «факт / стартовая модель») больше чем в 3 раза. Так один прогон с утечкой
+    VRAM или параллельной нагрузкой на GPU не перекашивает прогноз на недели вперёд."""
+    if len(samples) < 3:
+        return samples
+    ratios = [s / (a0 + b0 * d) for d, s in samples]
+    med = statistics.median(ratios)
+    return [x for x, r in zip(samples, ratios) if med / OUTLIER_FACTOR <= r <= med * OUTLIER_FACTOR]
 
 
 def _fit(samples, a0, b0):

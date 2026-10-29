@@ -193,14 +193,22 @@ def _extract_real_cost(response):
 # Стоимость вызовов по текущему файлу. Обработка идёт в фоновом потоке (не в Streamlit),
 # поэтому копим не в session_state, а здесь; прогон в процессе всегда один.
 _file_cost = 0.0
+_file_retries = 0   # сколько запросов по файлу пришлось повторять (сбои сети/шлюза)
 _cost_lock = threading.Lock()
 
 
 def reset_file_cost():
-    """Обнуляет счётчик перед новым файлом."""
-    global _file_cost
+    """Обнуляет счётчики перед новым файлом."""
+    global _file_cost, _file_retries
     with _cost_lock:
         _file_cost = 0.0
+        _file_retries = 0
+
+
+def get_file_retries():
+    """Были ли по текущему файлу повторы запросов — тогда его время не годится в замеры."""
+    with _cost_lock:
+        return _file_retries
 
 
 def get_file_cost():
@@ -285,6 +293,9 @@ def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_to
         try:
             response = _stream_chat(client, model, messages, temperature, max_tokens)
         except retryable as e:
+            global _file_retries
+            with _cost_lock:
+                _file_retries += 1
             print(f"⚠️ [{label}] попытка {attempt}/{attempts} не удалась через "
                   f"{time.time() - t_try:.0f} с: {type(e).__name__}: {e}")
             if attempt == attempts:

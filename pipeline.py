@@ -23,7 +23,7 @@ from audio import (
 )
 from llm_analysis import (
     COST_CURRENCY, llm_chat, LLMCancelled, smart_text_correction, correct_speaker_roles,
-    unload_ollama_model, ensure_ollama_running, reset_file_cost, get_file_cost,
+    unload_ollama_model, ensure_ollama_running, reset_file_cost, get_file_cost, get_file_retries,
     check_model_access,
 )
 from run_log import RunLog
@@ -747,7 +747,10 @@ class Job:
                 })
                 self.analysed_n += 1
                 self._p2.append((self._file_pred, t_phase2))
-                timing_stats.record(timing_stats.analyze_key(cfg), dur, t_phase2)
+                if get_file_retries():  # время со сбоями шлюза — не скорость модели
+                    print(f"⏱️ {fname}: были повторы запросов — в замеры времени не пишу")
+                else:
+                    timing_stats.record(timing_stats.analyze_key(cfg), dur, t_phase2)
                 print(f"✅ [{j}/{self.phase_total}] {fname}: анализ {fmt_duration(t_phase2)} "
                       f"(прогноз был {fmt_duration(self._file_pred)}), {file_cost:.2f} {COST_CURRENCY}")
             except LLMCancelled:
