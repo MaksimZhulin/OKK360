@@ -10,5 +10,6 @@ CREDENTIALS_FILE = "credentials.json"
 SHEET_TITLE = "Выгрузка из проекта"       # чистое имя листа (для сравнения title)
 SHEET_NAME = f"'{SHEET_TITLE}'"           # имя в кавычках — для A1-нотации диапазонов
 
-# LLM-прокси (tokengate / LiteLLM, OpenAI-совместимый эндпоинт)
-LLM_BASE_URL = "https://litellm.tokengate.ru/v1"
+# LLM-шлюз AgentPlatform (бывший tokengate), OpenAI-совместимый эндпоинт.
+# Старый адрес litellm.tokengate.ru отключён (октябрь 2026).
+LLM_BASE_URL = "https://api.agentplatform.ru/v1"

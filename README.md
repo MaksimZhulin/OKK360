@@ -317,7 +317,7 @@ scope `spreadsheets`). Ищется первая пустая строка по 
 
 | Режим | Транспорт | Модели |
 |---|---|---|
-| Облако | OpenAI SDK → LiteLLM/tokengate (`https://litellm.tokengate.ru/v1`) | `google/gemini-2.5-flash` (по умолчанию), `deepseek/deepseek-chat`, `openai/gpt-4o`, `mistralai/mistral-nemo` |
+| Облако | OpenAI SDK → AgentPlatform, бывший tokengate (`https://api.agentplatform.ru/v1`) | `google/gemini-2.5-flash` (по умолчанию), `deepseek/deepseek-chat`, `openai/gpt-4o`, `mistralai/mistral-nemo` |
 | Локально | нативный `POST http://127.0.0.1:11434/api/chat` (Ollama) | `qwen3:14b` (по умолчанию), `mistral-nemo` |
 
 Особенности локального контура: приложение само поднимает `ollama serve`; все локальные
