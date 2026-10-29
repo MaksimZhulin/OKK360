@@ -9,7 +9,7 @@ import openai
 # ============== НАСТРОЙКИ ==============
 # 1. DeepSeek API
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL = "gemini-2.5-flash"  # название по каталогу AgentPlatform
+DEEPSEEK_MODEL = "google/gemini-2.5-flash"  # с префиксом поставщика, как в API AgentPlatform
 
 # 2. Google Таблица + LLM-эндпоинт (значения вынесены в config.py)
 from config import CREDENTIALS_FILE, SPREADSHEET_ID, SHEET_NAME, LLM_BASE_URL

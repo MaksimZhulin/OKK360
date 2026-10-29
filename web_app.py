@@ -121,11 +121,11 @@ with st.sidebar:
         analysis_model = st.selectbox(
             "🧠 Модель анализа",
             [
-                # названия — как в каталоге AgentPlatform (без префикса вендора)
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
-                "deepseek-chat",
-                "gpt-4o",
+                # названия — с префиксом поставщика, как в примерах API AgentPlatform
+                "google/gemini-2.5-flash",
+                "google/gemini-2.5-flash-lite",
+                "deepseek/deepseek-chat",
+                "openai/gpt-4o",
             ],
             index=0
         )

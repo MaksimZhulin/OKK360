@@ -328,7 +328,7 @@ scope `spreadsheets`). Ищется первая пустая строка по 
 
 | Режим | Транспорт | Модели |
 |---|---|---|
-| Облако | OpenAI SDK → AgentPlatform, бывший tokengate (`https://api.agentplatform.ru/v1`) | `gemini-2.5-flash` (по умолчанию), `gemini-2.5-flash-lite`, `deepseek-chat`, `gpt-4o` |
+| Облако | OpenAI SDK → AgentPlatform, бывший tokengate (`https://api.agentplatform.ru/v1`) | `google/gemini-2.5-flash` (по умолчанию), `google/gemini-2.5-flash-lite`, `deepseek/deepseek-chat`, `openai/gpt-4o` |
 | Локально | нативный `POST http://127.0.0.1:11434/api/chat` (Ollama) | `qwen3:14b` (по умолчанию), `mistral-nemo` |
 
 Особенности локального контура: приложение само поднимает `ollama serve`; все локальные
@@ -338,8 +338,8 @@ scope `spreadsheets`). Ищется первая пустая строка по 
 
 Учёт стоимости — в рублях, приоритет у реальной цены из ответа прокси
 (`_hidden_params.response_cost`), иначе расчёт по токенам. Тарифы за 1000 токенов (вход/выход):
-`gemini-2.5-flash` 0,0324 / 0,27 ₽, `gemini-2.5-flash-lite` 0,0108 / 0,0432 ₽,
-`deepseek-chat` 0,0346 / 0,0961 ₽, `gpt-4o` 0,27 / 1,08 ₽ (каталог AgentPlatform).
+`google/gemini-2.5-flash` 0,0324 / 0,27 ₽, `google/gemini-2.5-flash-lite` 0,0108 / 0,0432 ₽,
+`deepseek/deepseek-chat` 0,0346 / 0,0961 ₽, `openai/gpt-4o` 0,27 / 1,08 ₽ (каталог AgentPlatform).
 
 ### Хранилище и интеграции
 
@@ -500,7 +500,7 @@ py nomenclature.py
   переносит обработанные файлы в `processed/` и ведёт `upload_log.txt`.
 - **`analyze_transcripts.py`** — анализирует уже залитые в таблицу транскрипты
   (диапазон `D2:F1000`) и дописывает результат в столбцы F–L. Модель захардкожена
-  (`gemini-2.5-flash`), ключ берётся из `DEEPSEEK_API_KEY`.
+  (`google/gemini-2.5-flash`), ключ берётся из `DEEPSEEK_API_KEY`.
 
 ---
 

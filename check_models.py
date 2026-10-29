@@ -24,8 +24,10 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 CANDIDATES = [
-    "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro",
-    "deepseek-chat", "gpt-4.1-mini", "gpt-4o-mini", "claude-haiku-4.5", "claude-sonnet-4.5",
+    "google/gemini-2.5-flash", "gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite", "google/gemini-2.5-pro",
+    "deepseek/deepseek-chat", "openai/gpt-4.1-mini", "openai/gpt-4o-mini",
+    "anthropic/claude-haiku-4.5", "anthropic/claude-sonnet-4.5",
 ]
 
 
