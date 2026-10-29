@@ -30,6 +30,14 @@ import torch
 
 try:
     import whisperx
+    # Подмодули whisperx импортируем СРАЗУ, на уровне модуля. Сам whisperx грузит их лениво —
+    # внутри функций загрузки моделей. А при этом импорте pyannote тянет optuna, которая
+    # навсегда сохраняет у себя исключение «No module named 'redis'» вместе с цепочкой
+    # кадров — включая кадры загрузки модели с самой моделью в локальных переменных.
+    # Итог был: после «выгрузки» ~5 ГБ VRAM оставались занятыми до перезапуска приложения,
+    # а следующий прогон грузил модели второй раз рядом (11+ ГБ, всё вставало).
+    import whisperx.asr, whisperx.alignment, whisperx.audio, whisperx.diarize  # noqa: E401,F401
+    from whisperx.diarize import DiarizationPipeline
     WHISPERX_AVAILABLE = True
     print("✅ WhisperX доступен")
 except ImportError as e:
@@ -279,7 +287,6 @@ def load_diarize_model(hf_token, device):
     Раньше он создавался заново на КАЖДЫЙ файл: каждая копия занимала VRAM, и на пачке
     в 100+ звонков память кончалась (CUDA out of memory посреди Фазы 1)."""
     print("👥 [Cache] Загрузка модели диаризации (pyannote)...")
-    from whisperx.diarize import DiarizationPipeline
     return DiarizationPipeline(token=hf_token, device=device)
 
 
