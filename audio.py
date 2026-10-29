@@ -65,7 +65,7 @@ def preprocess_audio(audio_path):
     cmd = [ffmpeg, "-y", "-i", audio_path, "-af", filters,
            "-ar", "16000", "-ac", "1", out_path]
     try:
-        st.write("🧹 Предобработка звука (нормализация громкости)...")
+        print("🧹 Предобработка звука (нормализация громкости)...")
         subprocess.run(cmd, check=True, capture_output=True)
         return out_path
     except Exception as e:
@@ -81,7 +81,7 @@ def pad_audio_simple_silence(audio_path, pad_seconds=2.0):
     import soundfile as sf
     import numpy as np
 
-    st.write(f"⏳ [Хак] Добавляем {pad_seconds:g} сек тишины для защиты первого слова...")
+    print(f"⏳ [Хак] Добавляем {pad_seconds:g} сек тишины для защиты первого слова...")
 
     try:
         data, samplerate = sf.read(audio_path)
@@ -127,7 +127,7 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
     file_name = os.path.basename(audio_path)
     object_name = f"audio_records/{file_name}"
     
-    st.write("☁️ [Яндекс] Загрузка файла в облако...")
+    print("☁️ [Яндекс] Загрузка файла в облако...")
     
     try:
         session = boto3.session.Session()
@@ -142,7 +142,7 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
     except Exception as e:
         return f"❌ Ошибка загрузки в Яндекс.Облако: {str(e)}"
 
-    st.write("🚀 [Яндекс] Распознавание и диаризация...")
+    print("🚀 [Яндекс] Распознавание и диаризация...")
     
     POST = "https://transcribe.api.cloud.yandex.net/speech/stt/v2/longRunningRecognize"
     
@@ -183,7 +183,7 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
             break
 
     if 'response' in data and 'chunks' in data['response']:
-        st.write("✅ [Яндекс] Текст получен. Сборка диалога...")
+        print("✅ [Яндекс] Текст получен. Сборка диалога...")
         
         segments = []
         for chunk in data['response']['chunks']:
@@ -213,7 +213,7 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
             pass
             
         elapsed = time.time() - start_time
-        st.write(f"✅ Яндекс завершил работу за {elapsed:.1f} сек!")
+        print(f"✅ Яндекс завершил работу за {elapsed:.1f} сек!")
         return full_text
     else:
         return f"❌ Ошибка: Яндекс не вернул текст. Ответ: {data}"
@@ -239,6 +239,15 @@ def load_align_model(language_code, device):
     model_a, metadata = whisperx.load_align_model(language_code=language_code, device=device)
     return model_a, metadata
 
+@st.cache_resource(show_spinner="Загрузка модели диаризации...")
+def load_diarize_model(hf_token, device):
+    """Загружает и кеширует пайплайн диаризации pyannote.
+    Раньше он создавался заново на КАЖДЫЙ файл: каждая копия занимала VRAM, и на пачке
+    в 100+ звонков память кончалась (CUDA out of memory посреди Фазы 1)."""
+    print("👥 [Cache] Загрузка модели диаризации (pyannote)...")
+    from whisperx.diarize import DiarizationPipeline
+    return DiarizationPipeline(token=hf_token, device=device)
+
 
 def free_gpu_memory():
     """Сбрасывает кэши CUDA и запускает сборку мусора. Вызываем после выгрузки
@@ -262,6 +271,7 @@ def unload_whisperx_from_vram():
     try:
         load_whisperx_model.clear()
         load_align_model.clear()
+        load_diarize_model.clear()
         print("🔄 WhisperX выгружен из кэша")
     except Exception as e:
         print(f"⚠️ Выгрузка WhisperX: {e}")
@@ -332,90 +342,128 @@ def build_turns_from_words(result):
         turns.append({"speaker": cur_spk, "text": text})
     return turns or None
 
+# batch_size WhisperX на GPU: первая попытка — быстрая; при нехватке VRAM повторяем
+# тот же файл с меньшим батчем (после перезагрузки моделей).
+WHISPERX_BATCH_SIZES = (14, 8, 4)
+
+_CUDA_ERROR_MARKERS = ("cuda", "out of memory", "cublas", "cudnn", "device ordinal")
+
+
+def is_cuda_error(err):
+    """Ошибка видеокарты (нехватка VRAM, сбой CUDA) — такие имеет смысл повторять
+    после очистки памяти. Принимает исключение или текст ошибки."""
+    text = str(err).lower()
+    return any(m in text for m in _CUDA_ERROR_MARKERS)
+
+
 def transcribe_with_whisperx_diarization(audio_path, hf_token, model_name="large-v3", min_speakers=2, max_speakers=2):
+    """Транскрибация + диаризация одного файла. Возвращает размеченный текст или
+    строку «❌ ОШИБКА WhisperX: ...» (полный traceback уходит в лог через print).
+    При ошибке GPU модели перезагружаются и файл повторяется с меньшим batch_size —
+    один сбой больше не валит все последующие файлы пачки."""
+    import traceback
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
-    
-    print(f"🔧 Устройство: {device} | 📦 Модель: {model_name}")
-    
-    try:
-        print("⏳ Получение модели WhisperX из кеша...")
-        model = load_whisperx_model(model_name, device, compute_type)
-        
-        print("🎤 Загрузка аудио...")
-        audio = whisperx.load_audio(audio_path)
-        
-        print("📝 Транскрибация...")
-        result = model.transcribe(
-            audio, 
-            batch_size=14 if device == "cuda" else 1,
-            language="ru"
-        )
-      
-        print("📍 Выравнивание по словам...")
-        model_a, metadata = load_align_model("ru", device)
-        result = whisperx.align(result["segments"], model_a, metadata, audio, device)
-        
-        print("👥 Диаризация спикеров...")
-        from whisperx.diarize import DiarizationPipeline
-        diarize_model = DiarizationPipeline(token=hf_token, device=device)
-        
-        diarize_segments = diarize_model(
-            audio, 
-            min_speakers=min_speakers, 
-            max_speakers=max_speakers
-        )
-        
-        print("🔗 Привязка спикеров...")
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+    batch_sizes = WHISPERX_BATCH_SIZES if device == "cuda" else (1,)
 
-        # Посегментная нарезка (пословная давала слипание коротких реплик — откатили)
-        segments = []
-        for segment in result["segments"]:
-            speaker = segment.get("speaker", "SPEAKER_00")
-            text = segment.get("text", "").strip()
-            if text:
-                segments.append({
-                    "speaker": speaker,
-                    "text": text,
-                    "start": segment["start"],
-                    "end": segment["end"]
-                })
-        
-        speaker_manager, speaker_client = identify_speaker_roles(segments)
-        print(f"🎭 Роль определена: Менеджер={speaker_manager}, Клиент={speaker_client}")
-        
-        labeled_segments = []
-        speakers_stats = {}
-        
-        for segment in segments:
-            speaker = segment.get("speaker", "SPEAKER_00")
-            text = segment.get("text", "").strip()
-            
-            if text:
-                speakers_stats[speaker] = speakers_stats.get(speaker, 0) + 1
-                
-                if speaker == speaker_manager:
-                    labeled_segments.append(f"👨‍💼 Менеджер: {text}")
-                elif speaker == speaker_client:
-                    labeled_segments.append(f"👤 Клиент: {text}")
-                else:
-                    labeled_segments.append(f"{speaker}: {text}")
-        
-        full_text = "\n".join(labeled_segments)
-        full_text = filter_duplicate_lines(full_text)
-        
-        print(f"✅ Готово! Спикеров: {len(speakers_stats)}")
-        for spk, count in speakers_stats.items():
-            role = "Менеджер" if spk == speaker_manager else "Клиент" if spk == speaker_client else "Неизвестно"
-            print(f"   {spk} ({role}): {count} реплик")
-            
-        return full_text
-        
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        return f"❌ ОШИБКА WhisperX: {str(e)}\n{error_details}"
+    print(f"🔧 Устройство: {device} | 📦 Модель: {model_name}")
+    last_err = None
+    for attempt, batch_size in enumerate(batch_sizes, 1):
+        try:
+            return _whisperx_pipeline(audio_path, hf_token, model_name, device, compute_type,
+                                      batch_size, min_speakers, max_speakers)
+        except Exception as e:
+            last_err = e
+            print(f"❌ WhisperX, попытка {attempt}/{len(batch_sizes)} (batch_size={batch_size}): {e}")
+            print(traceback.format_exc())
+            if not is_cuda_error(e) or attempt == len(batch_sizes):
+                break
+            # После сбоя CUDA модель может остаться в нерабочем состоянии
+            # (дальше «invalid device ordinal» на каждом файле) — перезагружаем всё.
+            print(f"🔁 Ошибка GPU — перезагружаю модели и повторяю с batch_size={batch_sizes[attempt]}")
+            unload_whisperx_from_vram()
+        finally:
+            # Чистим VRAM после КАЖДОГО файла: кэш PyTorch (выравнивание, pyannote)
+            # иначе копится, и CTranslate2 (сам Whisper) упирается в нехватку памяти.
+            free_gpu_memory()
+    return f"❌ ОШИБКА WhisperX: {last_err}"
+
+
+def _whisperx_pipeline(audio_path, hf_token, model_name, device, compute_type,
+                       batch_size, min_speakers, max_speakers):
+    """Один проход: транскрибация → выравнивание → диаризация → роли. Исключения
+    пробрасывает наверх (повтор и обработку делает transcribe_with_whisperx_diarization)."""
+    print("⏳ Получение модели WhisperX из кеша...")
+    model = load_whisperx_model(model_name, device, compute_type)
+
+    print("🎤 Загрузка аудио...")
+    audio = whisperx.load_audio(audio_path)
+
+    print(f"📝 Транскрибация (batch_size={batch_size})...")
+    result = model.transcribe(
+        audio,
+        batch_size=batch_size,
+        language="ru"
+    )
+
+    print("📍 Выравнивание по словам...")
+    model_a, metadata = load_align_model("ru", device)
+    result = whisperx.align(result["segments"], model_a, metadata, audio, device)
+
+    print("👥 Диаризация спикеров...")
+    diarize_model = load_diarize_model(hf_token, device)
+
+    diarize_segments = diarize_model(
+        audio,
+        min_speakers=min_speakers,
+        max_speakers=max_speakers
+    )
+
+    print("🔗 Привязка спикеров...")
+    result = whisperx.assign_word_speakers(diarize_segments, result)
+
+    # Посегментная нарезка (пословная давала слипание коротких реплик — откатили)
+    segments = []
+    for segment in result["segments"]:
+        speaker = segment.get("speaker", "SPEAKER_00")
+        text = segment.get("text", "").strip()
+        if text:
+            segments.append({
+                "speaker": speaker,
+                "text": text,
+                "start": segment["start"],
+                "end": segment["end"]
+            })
+
+    speaker_manager, speaker_client = identify_speaker_roles(segments)
+    print(f"🎭 Роль определена: Менеджер={speaker_manager}, Клиент={speaker_client}")
+
+    labeled_segments = []
+    speakers_stats = {}
+
+    for segment in segments:
+        speaker = segment.get("speaker", "SPEAKER_00")
+        text = segment.get("text", "").strip()
+
+        if text:
+            speakers_stats[speaker] = speakers_stats.get(speaker, 0) + 1
+
+            if speaker == speaker_manager:
+                labeled_segments.append(f"👨‍💼 Менеджер: {text}")
+            elif speaker == speaker_client:
+                labeled_segments.append(f"👤 Клиент: {text}")
+            else:
+                labeled_segments.append(f"{speaker}: {text}")
+
+    full_text = "\n".join(labeled_segments)
+    full_text = filter_duplicate_lines(full_text)
+
+    print(f"✅ Готово! Спикеров: {len(speakers_stats)}")
+    for spk, count in speakers_stats.items():
+        role = "Менеджер" if spk == speaker_manager else "Клиент" if spk == speaker_client else "Неизвестно"
+        print(f"   {spk} ({role}): {count} реплик")
+
+    return full_text
 
 def identify_speaker_roles(segments):
     def normalize_for_analysis(text):

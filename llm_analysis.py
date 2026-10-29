@@ -217,10 +217,52 @@ def add_llm_cost(model, response):
     except Exception as e:
         print(f"⚠️ Учёт стоимости: {e}")
 
-def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode=False):
-    """Использует LLM для умной коррекции слов по контексту без изменения сути"""
-    from openai import OpenAI
+# Облачные вызовы: SDK по умолчанию ждёт ответа до 10 минут и сам повторяет 2 раза —
+# на подвисшем шлюзе файл висел десятки минут. Ждём меньше и повторяем сами, с логом.
+CLOUD_TIMEOUT = 180            # сек на один запрос
+CLOUD_RETRY_PAUSES = (10, 30)  # паузы перед 2-й и 3-й попыткой
 
+
+def llm_chat(messages, model, api_key, local_mode=False, temperature=0.3, max_tokens=2500, label=""):
+    """Единая точка вызова LLM: локально — нативный Ollama, в облаке — OpenAI-совместимый
+    прокси с таймаутом и повторами при сетевых сбоях / перегрузке шлюза.
+    Стоимость облачного вызова копится в session_state (add_llm_cost).
+    Возвращает текст ответа без <think>; при исчерпании попыток пробрасывает исключение."""
+    import time
+    t0 = time.time()
+    if local_mode:
+        text = strip_think(ollama_native_chat(messages, model, temperature=temperature,
+                                              max_tokens=max_tokens))
+        print(f"⏱️ [{label}] {time.time() - t0:.0f} с (локально, {model})")
+        return text
+
+    from openai import (OpenAI, APITimeoutError, APIConnectionError,
+                        RateLimitError, InternalServerError)
+    retryable = (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError)
+    client = OpenAI(api_key=api_key, base_url=LLM_BASE_URL,
+                    timeout=CLOUD_TIMEOUT, max_retries=0)
+    attempts = len(CLOUD_RETRY_PAUSES) + 1
+    for attempt in range(1, attempts + 1):
+        t_try = time.time()
+        try:
+            response = client.chat.completions.create(
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+        except retryable as e:
+            print(f"⚠️ [{label}] попытка {attempt}/{attempts} не удалась через "
+                  f"{time.time() - t_try:.0f} с: {type(e).__name__}: {e}")
+            if attempt == attempts:
+                raise
+            pause = CLOUD_RETRY_PAUSES[attempt - 1]
+            print(f"   повтор через {pause} с")
+            time.sleep(pause)
+            continue
+        add_llm_cost(model, response)
+        print(f"⏱️ [{label}] {time.time() - t0:.0f} с ({model}, попытка {attempt})")
+        return strip_think(response.choices[0].message.content or "")
+
+
+def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_mode=False, label=""):
+    """Использует LLM для умной коррекции слов по контексту без изменения сути"""
     prompt = f"""Исправь ошибки транскрибации в тексте звонка.
     Особенно обрати внимание на названия компаний и термины.
     Контекст: Это разговор с компанией "СтальМетУрал" (также может быть "СМУ", "Стальмет").
@@ -258,29 +300,22 @@ def smart_text_correction(transcript_text, analysis_model, deepseek_key, local_m
         {"role": "user", "content": prompt}
     ]
     try:
-        if local_mode:
-            corrected_text = strip_think(ollama_native_chat(messages, analysis_model,
-                                                            temperature=0.1, max_tokens=4000))
-        else:
-            client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
-            response = client.chat.completions.create(
-                model=analysis_model, messages=messages, temperature=0.1, max_tokens=4000)
-            add_llm_cost(analysis_model, response)
-            corrected_text = strip_think(response.choices[0].message.content)
+        corrected_text = llm_chat(messages, analysis_model, deepseek_key, local_mode,
+                                  temperature=0.1, max_tokens=4000,
+                                  label=f"коррекция текста: {label}")
 
         if "Менеджер:" in corrected_text or "Клиент:" in corrected_text:
             return corrected_text
         else:
+            print(f"⚠️ [коррекция текста: {label}] в ответе нет меток ролей — оставляю исходный текст")
             return transcript_text
-            
+
     except Exception as e:
-        print(f"⚠️ Ошибка коррекции текста: {e}")
+        print(f"⚠️ [коррекция текста: {label}] не удалась, оставляю исходный текст: {e}")
         return transcript_text
 
-def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode=False):
+def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_mode=False, label=""):
     """Использует LLM для глубокой коррекции ролей спикеров в транскрипции"""
-    from openai import OpenAI
-
     prompt = f"""Перед тобой транскрипция телефонного звонка в компанию "СтальМетУрал".
 Из-за технических особенностей записи нейросеть могла:
 1. Оставить теги в формате "SPEAKER_01 / SPEAKER_02" или перепутать менеджера и клиента.
@@ -313,21 +348,16 @@ def correct_speaker_roles(transcript_text, analysis_model, deepseek_key, local_m
         {"role": "user", "content": prompt}
     ]
     try:
-        if local_mode:
-            corrected_text = strip_think(ollama_native_chat(messages, analysis_model,
-                                                            temperature=0.2, max_tokens=4000))
-        else:
-            client = OpenAI(api_key=deepseek_key, base_url=LLM_BASE_URL)
-            response = client.chat.completions.create(
-                model=analysis_model, messages=messages, temperature=0.2, max_tokens=4000)
-            add_llm_cost(analysis_model, response)
-            corrected_text = strip_think(response.choices[0].message.content)
+        corrected_text = llm_chat(messages, analysis_model, deepseek_key, local_mode,
+                                  temperature=0.2, max_tokens=4000,
+                                  label=f"коррекция ролей: {label}")
 
         if "👨‍💼 Менеджер:" in corrected_text and "👤 Клиент:" in corrected_text:
             return corrected_text
         else:
+            print(f"⚠️ [коррекция ролей: {label}] в ответе нет обеих ролей — оставляю исходный текст")
             return transcript_text
-            
+
     except Exception as e:
-        print(f"⚠️ Ошибка коррекции ролей: {e}")
+        print(f"⚠️ [коррекция ролей: {label}] не удалась, оставляю исходный текст: {e}")
         return transcript_text
