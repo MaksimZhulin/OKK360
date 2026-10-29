@@ -30,14 +30,6 @@ import torch
 
 try:
     import whisperx
-    # Подмодули whisperx импортируем СРАЗУ, на уровне модуля. Сам whisperx грузит их лениво —
-    # внутри функций загрузки моделей. А при этом импорте pyannote тянет optuna, которая
-    # навсегда сохраняет у себя исключение «No module named 'redis'» вместе с цепочкой
-    # кадров — включая кадры загрузки модели с самой моделью в локальных переменных.
-    # Итог был: после «выгрузки» ~5 ГБ VRAM оставались занятыми до перезапуска приложения,
-    # а следующий прогон грузил модели второй раз рядом (11+ ГБ, всё вставало).
-    import whisperx.asr, whisperx.alignment, whisperx.audio, whisperx.diarize  # noqa: E401,F401
-    from whisperx.diarize import DiarizationPipeline
     WHISPERX_AVAILABLE = True
     print("✅ WhisperX доступен")
 except ImportError as e:
@@ -238,6 +230,20 @@ def transcribe_with_yandex(audio_path, yandex_api_key, aws_access_key_id, aws_se
     else:
         return f"❌ Ошибка: Яндекс не вернул текст. Ответ: {data}"
 
+def _preimport_whisperx():
+    """Импортирует подмодули whisperx ДО загрузки моделей, из кадра без модели.
+    Сам whisperx импортирует их лениво — внутри load_model/load_align_model. При этом
+    pyannote тянет optuna, а та навсегда сохраняет исключение «No module named 'redis'»
+    с traceback; цепочка его кадров (f_back) доходила до кадров загрузки, где в локальных
+    переменных лежала модель — после «выгрузки» ~5 ГБ VRAM оставались занятыми, и
+    следующий прогон клал модели второй раз рядом (11+ ГБ → своп → out of memory).
+    Импорт на уровне модуля (при старте приложения) не годится: в процессе Streamlit
+    это давало нативное падение. Повторные вызовы — мгновенные (модули уже загружены)."""
+    import importlib
+    for name in ("asr", "alignment", "audio", "diarize"):
+        importlib.import_module(f"whisperx.{name}")
+
+
 def _model_cache(func):
     """Кэш загруженных моделей на уровне процесса (вместо st.cache_resource):
     обработка идёт в фоновом потоке, где Streamlit-кэш недоступен. Ключ — аргументы
@@ -249,6 +255,7 @@ def _model_cache(func):
     def wrapper(*args):
         with lock:
             if args not in cache:
+                _preimport_whisperx()  # до загрузки — см. пояснение у функции
                 cache[args] = func(*args)
             return cache[args]
 
@@ -287,6 +294,7 @@ def load_diarize_model(hf_token, device):
     Раньше он создавался заново на КАЖДЫЙ файл: каждая копия занимала VRAM, и на пачке
     в 100+ звонков память кончалась (CUDA out of memory посреди Фазы 1)."""
     print("👥 [Cache] Загрузка модели диаризации (pyannote)...")
+    from whisperx.diarize import DiarizationPipeline
     return DiarizationPipeline(token=hf_token, device=device)
 
 
@@ -451,6 +459,7 @@ def warmup_whisperx(hf_token, model_name="large-v3"):
     """Загружает модели WhisperX (распознавание, выравнивание, диаризация) заранее —
     отдельным шагом, чтобы время загрузки не размазывалось по первому файлу и
     мерилось само по себе. Если модели уже в памяти — почти мгновенно."""
+    _preimport_whisperx()  # из этого кадра: в нём модели не будет
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
     load_whisperx_model(model_name, device, compute_type)
