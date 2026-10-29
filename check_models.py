@@ -8,6 +8,7 @@
 которые шлюз отдаёт этому ключу, и пробует крошечный запрос к нашим кандидатам.
 Стоимость проверки — доли копейки.
 """
+import os
 import sys
 import getpass
 
@@ -28,10 +29,20 @@ CANDIDATES = [
 
 
 def main():
-    key = getpass.getpass("API-ключ AgentPlatform (ввод не отображается): ").strip()
+    # Ключ: из переменной OKK_API_KEY или скрытым вводом. В консоли Windows при скрытом
+    # вводе Ctrl+V часто НЕ вставляет текст — вставляйте правой кнопкой мыши.
+    key = os.environ.get("OKK_API_KEY", "").strip()
+    if not key:
+        key = getpass.getpass("API-ключ AgentPlatform (ввод не отображается; "
+                              "вставка — правой кнопкой мыши): ")
+    raw_len = len(key)
+    key = "".join(ch for ch in key if ch.isprintable()).strip()
     if not key:
         print("Ключ не введён.")
         return
+    # Что реально получено — без раскрытия ключа: длина и края
+    print(f"Получен ключ: {len(key)} символов, {key[:4]}…{key[-4:]}"
+          + (f" (убрано невидимых символов: {raw_len - len(key)})" if raw_len != len(key) else ""))
     client = OpenAI(api_key=key, base_url=LLM_BASE_URL, timeout=60, max_retries=0)
 
     print(f"\nШлюз: {LLM_BASE_URL}")
