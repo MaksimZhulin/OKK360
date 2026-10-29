@@ -299,10 +299,13 @@ class Job:
     """Один прогон пачки файлов. В процессе одновременно живёт только один
     (видеокарта одна) — см. start_job()/get_job()."""
 
-    def __init__(self, files, cfg):
-        self.files = list(files)   # объекты с .name и .getvalue()
+    def __init__(self, files, cfg, pretranscribed=None):
+        self.files = list(files)   # объекты с .name и .getvalue() — пройдут обе фазы
+        # Готовые расшифровки (повтор упавшего анализа) — сразу в Фазу 2, без транскрибации:
+        # [{name, transcript, duration, t_phase1}]
+        self.pre = [dict(p) for p in (pretranscribed or [])]
         self.cfg = dict(cfg)
-        self.total = len(self.files)
+        self.total = len(self.files) + len(self.pre)
         self.log = RunLog()
         self._pause = threading.Event()
         self._stop = threading.Event()
@@ -326,7 +329,7 @@ class Job:
         self.stage_file = ""
         self.stage_idx = 0
 
-        self.transcribed_n = 0
+        self.transcribed_n = len(self.pre)
         self.analysed_n = 0
         self.errors_n = 0
         self.cost_total = 0.0
@@ -343,7 +346,7 @@ class Job:
                            if "WhisperX" in self.cfg["transcription_method"] else 0.0)
         self._p1 = []               # [(прогноз, факт)] по готовым файлам фазы 1
         self._p2 = []               # то же для фазы 2
-        self._queue2 = []           # длительности файлов, ждущих анализа
+        self._queue2 = [p["duration"] for p in self.pre]  # длительности файлов, ждущих анализа
         self._file_start = None     # clock() начала текущего файла
         self._file_pred = 0.0       # прогноз текущего файла
 
@@ -458,13 +461,13 @@ class Job:
         print(msg)
         self.notes.append((level, msg))
 
-    def _fail(self, fname, stage, err, elapsed, cost=0.0):
+    def _fail(self, fname, stage, err, elapsed, cost=0.0, extra=None):
         lines = str(err).strip().splitlines()
         short = lines[0].lstrip("❌ ") if lines else type(err).__name__
         self.errors_n += 1
         print(f"❌ [{stage}] {fname}: {short}")
         self.results.append({'filename': fname, 'status': 'error', 'stage': stage,
-                             'error': short, 'elapsed': elapsed, 'cost': cost})
+                             'error': short, 'elapsed': elapsed, 'cost': cost, **(extra or {})})
 
     def _run(self):
         with self.log:
@@ -504,11 +507,15 @@ class Job:
         api_key = cfg["api_key"]
         use_whisperx = "WhisperX" in cfg["transcription_method"]
         files, total_files = self.files, self.total
+        n1 = len(files)  # сколько файлов пойдёт через транскрибацию
 
         print(f"===== Прогон: {total_files} файлов · транскрибация: {cfg['transcription_method']} · "
               f"анализ: {analysis_model} ({'локально' if local_mode else 'облако'}) =====")
         print(f"Аудио всего: {fmt_duration(sum(self.durations))} · прогноз на старте: "
               f"{fmt_duration(self.eta())} (замеров: транскрибация {self._t_rate.n}, анализ {self._a_rate.n})")
+        if self.pre:
+            print(f"Повтор: {len(self.pre)} файлов — только анализ (расшифровки уже есть), "
+                  f"{n1} — полностью")
         # На 12 ГБ VRAM WhisperX large-v3 и Qwen-14B одновременно не помещаются, поэтому
         # обрабатываем в две фазы: сначала транскрибируем ВСЕ файлы (GPU занят только
         # WhisperX), затем выгружаем его и анализируем ВСЕ транскрипты (GPU занят только Qwen).
@@ -529,16 +536,16 @@ class Job:
                 raise PreflightFailed(problem)
             print(f"✅ Модель {analysis_model} доступна")
 
-        transcribed = []  # сырые транскрипты переносим из Фазы 1 в Фазу 2
+        transcribed = list(self.pre)  # сырые транскрипты переносим из Фазы 1 в Фазу 2
         gpu_fail_streak = 0
         gpu_broken = False
         os.makedirs(TEMP_DIR, exist_ok=True)
 
         # ============ ФАЗА 1: ТРАНСКРИБАЦИЯ (GPU = только WhisperX) ============
-        self._start_phase(1, "Транскрибация", total_files)
+        self._start_phase(1, "Транскрибация", n1)
         # Модели WhisperX грузим отдельным шагом: загрузка меряется сама по себе,
         # а время первого файла не раздувается (точнее и прогноз, и замеры).
-        if use_whisperx and cfg["hf_token"] and WHISPERX_AVAILABLE:
+        if n1 and use_whisperx and cfg["hf_token"] and WHISPERX_AVAILABLE:
             self.checkpoint()
             self.stage, self.stage_file = "⏳ Загрузка моделей распознавания (WhisperX)...", ""
             t0 = self.clock()
@@ -603,14 +610,14 @@ class Job:
                     raise Exception(transcript_text)
 
                 t_phase1 = self.clock() - file_start
-                transcribed.append({'uploaded_file': uploaded_file, 'transcript': transcript_text,
+                transcribed.append({'name': fname, 'transcript': transcript_text,
                                     't_phase1': t_phase1, 'duration': dur})
                 self._queue2.append(dur)
                 self._p1.append((self._file_pred, t_phase1))
                 timing_stats.record(timing_stats.transcribe_key(cfg), dur, t_phase1)
                 self.transcribed_n += 1
                 gpu_fail_streak = 0
-                print(f"✅ [{i}/{total_files}] {fname}: транскрибация {fmt_duration(t_phase1)} "
+                print(f"✅ [{i}/{n1}] {fname}: транскрибация {fmt_duration(t_phase1)} "
                       f"(аудио {fmt_duration(dur)}, прогноз был {fmt_duration(self._file_pred)}), "
                       f"{len(transcript_text)} симв.")
             except Exception as e:
@@ -638,8 +645,9 @@ class Job:
 
         # === СМЕНА МОДЕЛИ НА GPU: выгружаем WhisperX, освобождаем VRAM под Qwen ===
         self.checkpoint()
-        self.stage, self.stage_file = "🔄 Освобождаю видеопамять перед анализом...", ""
-        unload_whisperx_from_vram()
+        if n1:
+            self.stage, self.stage_file = "🔄 Освобождаю видеопамять перед анализом...", ""
+            unload_whisperx_from_vram()
         phase1_time = self.clock() - self.started
 
         # ============ ФАЗА 2: КОРРЕКЦИЯ + АНАЛИЗ (GPU = только Qwen / облако) ============
@@ -647,8 +655,7 @@ class Job:
         self._queue2 = [it['duration'] for it in transcribed]
         self._start_phase(2, "Анализ", len(transcribed))
         for j, item in enumerate(transcribed, 1):
-            uploaded_file = item['uploaded_file']
-            fname = uploaded_file.name
+            fname = item['name']
             transcript_text = item['transcript']
             file_start = self.clock()
             dur = item['duration']
@@ -719,8 +726,11 @@ class Job:
                 raise Cancelled()
             except Exception as e:
                 print(traceback.format_exc())
+                # расшифровку сохраняем — анализ можно будет повторить без транскрибации
                 self._fail(fname, stage, e, item['t_phase1'] + (self.clock() - file_start),
-                           cost=get_file_cost())
+                           cost=get_file_cost(),
+                           extra={'transcript': item['transcript'], 'duration': dur,
+                                  't_phase1': item['t_phase1']})
             finally:
                 # Деньги за вызовы, сделанные до ошибки/остановки, тоже потрачены — учитываем
                 self.cost_total += get_file_cost()
@@ -749,12 +759,13 @@ def get_job():
     return _REG.job
 
 
-def start_job(files, cfg):
+def start_job(files, cfg, pretranscribed=None):
     """Запускает новый прогон. Если предыдущий ещё идёт — возвращает его (второй
-    параллельный прогон на одной видеокарте только уронил бы оба)."""
+    параллельный прогон на одной видеокарте только уронил бы оба).
+    pretranscribed — готовые расшифровки для повтора анализа (минуя транскрибацию)."""
     with _REG.lock:
         if _REG.job is not None and _REG.job.active:
             return _REG.job
-        _REG.job = Job(files, cfg)
+        _REG.job = Job(files, cfg, pretranscribed)
         _REG.job._thread.start()
         return _REG.job

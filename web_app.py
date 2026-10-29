@@ -28,10 +28,6 @@ from scoring import (
 )
 
 
-# Окно лога на экране прогона: сколько последних строк показывать
-LOG_VIEW_LINES = 15
-
-
 # =============== НАСТРОЙКИ STREAMLIT ===============
 st.set_page_config(page_title="Массовый анализ звонков", page_icon="🎤", layout="wide")
 if 'uploaded_files' not in st.session_state:
@@ -58,21 +54,90 @@ def sheet_cell_text(text):
 
 
 def claim_job(job):
-    """Забирает итоги закончившегося прогона в сессию (ровно один раз)."""
+    """Забирает итоги закончившегося прогона в сессию (ровно один раз).
+    Если это был повтор упавших — результаты сливаются с уже успешными."""
     job.claimed = True
     st.session_state.confirm_stop = False
-    st.session_state.run_log_path = job.log.path
-    if job.outcome == "cancelled":
+    is_retry = st.session_state.pop("retry_merge", False)
+    paths = st.session_state.get("run_log_paths", []) if is_retry else []
+    st.session_state.run_log_paths = paths + [job.log.path]
+    if job.outcome == "cancelled" and not is_retry:
         st.session_state.processing_results = []
         st.session_state.uploaded_files = []
         st.session_state.current_step = 1
         st.session_state.flash = "⏹️ Анализ остановлен и сброшен. Загрузите файлы и запустите обработку заново."
+        return
+    if is_retry:
+        kept = [r for r in st.session_state.processing_results if r['status'] == 'success']
+        if job.outcome == "cancelled":
+            # остановлен только повтор — прежние результаты остаются как были
+            st.session_state.run_notes = [("info", "⏹️ Повтор остановлен — показаны прежние результаты.")]
+            st.session_state.current_step = 3
+            return
+        st.session_state.processing_results = kept + list(job.results)
+        st.session_state.total_elapsed = st.session_state.get("total_elapsed", 0) + job.elapsed()
+        prev = st.session_state.get("phase_times") or {}
+        new = job.phase_times or {}
+        st.session_state.phase_times = {k: prev.get(k, 0) + new.get(k, 0) for k in ("transcribe", "analyze")}
     else:  # done или failed (во втором случае — то, что успело обработаться)
         st.session_state.processing_results = list(job.results)
         st.session_state.total_elapsed = job.elapsed()
         st.session_state.phase_times = job.phase_times or None
-        st.session_state.run_notes = list(job.notes)
-        st.session_state.current_step = 3
+    st.session_state.run_notes = list(job.notes)
+    st.session_state.current_step = 3
+
+
+LOG_PAGE = 200  # строк на странице просмотрщика лога
+
+
+def show_log_viewer(path, key):
+    """Просмотр лога постранично и поиск по нему. Сам не обновляется (в отличие от
+    живого экрана прогона) — поэтому его можно спокойно листать и прокручивать."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        st.caption("Лог пока пуст.")
+        return
+    n = len(lines)
+    pages = max(1, -(-n // LOG_PAGE))
+    pkey, fkey = f"{key}_page", f"{key}_follow"
+    if st.session_state.get(fkey, True):  # «следим за концом» — показываем свежие строки
+        st.session_state[pkey] = pages
+    page = min(max(1, st.session_state.get(pkey, pages)), pages)
+
+    query = st.text_input("🔎 Поиск по логу", key=f"{key}_q",
+                          placeholder="например: ❌, 403, попытка, имя файла")
+    if query:
+        q = query.lower()
+        hits = [(i, s) for i, s in enumerate(lines, 1) if q in s.lower()]
+        st.caption(f"Найдено строк: {len(hits)}" + (" — показаны первые 500" if len(hits) > 500 else "")
+                   + ". Номер слева — строка лога: по нему можно перейти к контексту.")
+        st.code("\n".join(f"{i:>6} │ {s}" for i, s in hits[:500]) or "—", language=None, height=400)
+        return
+
+    def go(p):
+        st.session_state[pkey] = p
+        st.session_state[fkey] = (p == pages)
+
+    def jump():
+        line = st.session_state.get(f"{key}_line")
+        if line:
+            go((int(line) - 1) // LOG_PAGE + 1)
+
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 2, 1, 1])
+    c1.button("⏮ В начало", key=f"{key}_first", on_click=go, args=(1,), disabled=page == 1, width="stretch")
+    c2.button("◀ Назад", key=f"{key}_prev", on_click=go, args=(page - 1,), disabled=page == 1, width="stretch")
+    c3.number_input("Перейти к строке", min_value=1, max_value=max(1, n), value=None, step=1,
+                    key=f"{key}_line", on_change=jump, label_visibility="collapsed",
+                    placeholder=f"перейти к строке (1–{n})")
+    c4.button("Вперёд ▶", key=f"{key}_next", on_click=go, args=(page + 1,), disabled=page == pages, width="stretch")
+    c5.button("В конец ⏭", key=f"{key}_last", on_click=go, args=(pages,), disabled=page == pages, width="stretch")
+    a = (page - 1) * LOG_PAGE
+    chunk = lines[a:a + LOG_PAGE]
+    st.caption(f"Строки {a + 1}–{a + len(chunk)} из {n} · страница {page} из {pages}")
+    st.code("\n".join(f"{i:>6} │ {s}" for i, s in enumerate(chunk, a + 1)) or "—",
+            language=None, height=400)
 
 
 @st.dialog("Сбросить текущий анализ?", dismissible=False)
@@ -272,13 +337,19 @@ elif st.session_state.current_step == 2:
     if job is None or job.claimed:
         # Новый прогон. Настройки снимаем с боковой панели один раз — дальше поток
         # работает с ними, даже если в панели что-то поменяют.
-        if not st.session_state.uploaded_files:
-            st.warning("❌ Нет файлов")
-            if st.button("← Назад"):
-                st.session_state.current_step = 1
-                st.rerun()
-            st.stop()
-        job = start_job(st.session_state.uploaded_files, current_run_cfg())
+        retry = st.session_state.pop("retry_request", None)
+        if retry:
+            # повтор упавших: часть — только анализ по готовым расшифровкам, часть — целиком
+            st.session_state.retry_merge = True
+            job = start_job(retry["files"], current_run_cfg(), pretranscribed=retry["pre"])
+        else:
+            if not st.session_state.uploaded_files:
+                st.warning("❌ Нет файлов")
+                if st.button("← Назад"):
+                    st.session_state.current_step = 1
+                    st.rerun()
+                st.stop()
+            job = start_job(st.session_state.uploaded_files, current_run_cfg())
 
     if not job.active:
         claim_job(job)  # прогон закончился — забираем результаты и уходим со страницы
@@ -355,12 +426,14 @@ elif st.session_state.current_step == 2:
         for level, msg in job.notes:
             getattr(st, level)(msg)
 
-        with st.expander("📜 Подробный лог прогона", expanded=False):
-            st.caption(f"Последние строки. Полный лог пишется в файл `{job.log.path}` — "
-                       "скачать его можно на экране результатов.")
-            st.code("\n".join(job.log.tail().splitlines()[-LOG_VIEW_LINES:]), language=None)
-
     job_view()
+
+    # Лог — вне живой части: не перерисовывается каждую секунду, поэтому его можно листать
+    with st.expander("📜 Подробный лог прогона", expanded=False):
+        st.caption(f"Файл: `{job.log.path}`. Сам не обновляется, чтобы не сбивать прокрутку — "
+                   "свежие строки по кнопке «Обновить». Скачать лог можно на экране результатов.")
+        st.button("🔄 Обновить", key="log_live_refresh")
+        show_log_viewer(job.log.path, "log_live")
 
 
 elif st.session_state.current_step == 3:
@@ -497,15 +570,42 @@ elif st.session_state.current_step == 3:
                 _stage = result.get('stage')
                 st.error(f"{_stage}: {result['error']}" if _stage else f"Ошибка: {result['error']}")
 
-    _log_path = st.session_state.get("run_log_path")
-    if _log_path and os.path.exists(_log_path):
-        with open(_log_path, encoding="utf-8") as _lf:
-            _log_text = _lf.read()
+    # Повтор упавших: упавшие на анализе — только анализ по сохранённой расшифровке;
+    # упавшие на транскрибации и не начатые (например, прогон не прошёл проверку доступа) —
+    # целиком, если их аудио ещё загружено в эту сессию.
+    _ok_names = {r['filename'] for r in successful}
+    _retry_pre = [{"name": r['filename'], "transcript": r['transcript'],
+                   "duration": r.get('duration', 0.0), "t_phase1": r.get('t_phase1', 0.0)}
+                  for r in failed if r.get('transcript')]
+    _pre_names = {p["name"] for p in _retry_pre}
+    _retry_files = [f for f in st.session_state.uploaded_files
+                    if f.name not in _ok_names and f.name not in _pre_names]
+    if _retry_pre or _retry_files:
+        _parts = []
+        if _retry_pre:
+            _parts.append(f"{len(_retry_pre)} — только анализ (расшифровка уже есть)")
+        if _retry_files:
+            _parts.append(f"{len(_retry_files)} — целиком (с транскрибацией)")
+        if st.button(f"🔁 Повторить упавшие ({len(_retry_pre) + len(_retry_files)})", type="primary",
+                     help="С текущими настройками боковой панели. Успешные результаты сохранятся, "
+                          "новые добавятся к ним. " + "; ".join(_parts) + "."):
+            st.session_state.retry_request = {"files": _retry_files, "pre": _retry_pre}
+            st.session_state.current_step = 2
+            st.rerun()
+        st.caption("Повтор: " + "; ".join(_parts) + ".")
+
+    _log_paths = [p for p in st.session_state.get("run_log_paths", []) if os.path.exists(p)]
+    if _log_paths:
         with st.expander("📜 Лог прогона", expanded=False):
-            st.code(_log_text, language=None, height=400)
-        st.download_button("⬇️ Скачать лог", data=_log_text.encode("utf-8"),
-                           file_name=os.path.basename(_log_path), mime="text/plain",
-                           on_click="ignore")
+            _lp = _log_paths[-1]
+            if len(_log_paths) > 1:  # был повтор — у каждого прогона свой лог
+                _lp = st.selectbox("Лог прогона", _log_paths[::-1], format_func=os.path.basename,
+                                   key="log_pick")
+            show_log_viewer(_lp, "log_" + os.path.basename(_lp))
+            with open(_lp, encoding="utf-8") as _lf:
+                st.download_button("⬇️ Скачать лог", data=_lf.read().encode("utf-8"),
+                                   file_name=os.path.basename(_lp), mime="text/plain",
+                                   on_click="ignore")
 
     col1, col2, col3 = st.columns(3)
     
@@ -521,9 +621,11 @@ elif st.session_state.current_step == 3:
             st.rerun()
 
     with col3:
-        # После успешной выгрузки кнопка гаснет — повторный клик задвоил бы строки в таблице
-        if successful and st.button("💾 Сохранить в Google Sheets", type="primary",
-                                    disabled=bool(st.session_state.sheets_saved)):
+        # Выгружаем только то, что ещё не выгружено: после «Повторить упавшие» уйдут лишь
+        # новые результаты, а повторный клик не задвоит строки в таблице.
+        to_save = [r for r in successful if not r.get('saved')]
+        if successful and st.button(f"💾 Сохранить в Google Sheets ({len(to_save)})", type="primary",
+                                    disabled=not to_save):
             with st.spinner("Сохраняю в таблицу..."):
                 try:
                     credentials = service_account.Credentials.from_service_account_file(
@@ -549,7 +651,7 @@ elif st.session_state.current_step == 3:
                     now = datetime.now()
                     upload_date = f"{now.day}.{now.month}.{now.year}"
                     
-                    for i, result in enumerate(successful):
+                    for i, result in enumerate(to_save):
                         analysis = result['analysis']
                         
                         establishing_contact = analysis.get("establishing_contact", 0)
@@ -617,7 +719,7 @@ elif st.session_state.current_step == 3:
                         all_rows_data.append(row_data)
                     
                     start_row = first_empty_row
-                    end_row = first_empty_row + len(successful) - 1
+                    end_row = first_empty_row + len(to_save) - 1
                     range_to_write = f"{SHEET_NAME}!A{start_row}:AA{end_row}"
 
                     # Гарантируем, что в листе достаточно строк (иначе update упадёт
@@ -657,8 +759,10 @@ elif st.session_state.current_step == 3:
                     # кнопка «Начать новую сессию» живут ВНЕ обработчика этой кнопки.
                     # (Раньше вложенная кнопка не срабатывала никогда: её клик перезапускает
                     # скрипт, внешняя кнопка в новом прогоне уже False, и до неё не доходит.)
+                    for r in to_save:
+                        r['saved'] = True
                     st.session_state.sheets_saved = {
-                        "count": len(successful), "start_row": start_row, "end_row": end_row,
+                        "count": len(to_save), "start_row": start_row, "end_row": end_row,
                         "gid": sheet_id if sheet_id is not None else 0,
                         "fresh": True,  # шарики показать один раз
                     }
